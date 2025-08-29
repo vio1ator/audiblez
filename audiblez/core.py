@@ -7,7 +7,7 @@ import os
 import traceback
 from glob import glob
 
-import torch.cuda
+import torch
 import spacy
 import ebooklib
 import soundfile
@@ -104,10 +104,14 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     if not has_ffmpeg:
         print('\033[91m' + 'ffmpeg not found. Please install ffmpeg to create mp3 and m4b audiobook files.' + '\033[0m')
 
+    accel_available = (
+        torch.cuda.is_available() or
+        (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available())
+    )
     stats = SimpleNamespace(
         total_chars=sum(map(len, texts)),
         processed_chars=0,
-        chars_per_sec=500 if torch.cuda.is_available() else 50)
+        chars_per_sec=500 if accel_available else 50)
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {stats.total_chars:,}')
     print('Total words:', len(' '.join(texts).split()))

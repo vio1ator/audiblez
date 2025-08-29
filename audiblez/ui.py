@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # A simple wxWidgets UI for audiblez
 
-import torch.cuda
+import torch
 import numpy as np
 import soundfile
 import threading
@@ -273,19 +273,26 @@ class MainWindow(wx.Frame):
         engine_radio_panel = wx.Panel(panel)
         cpu_radio = wx.RadioButton(engine_radio_panel, label="CPU", style=wx.RB_GROUP)
         cuda_radio = wx.RadioButton(engine_radio_panel, label="CUDA")
-        if torch.cuda.is_available():
+        mps_radio = wx.RadioButton(engine_radio_panel, label="MPS")
+
+        has_cuda = torch.cuda.is_available()
+        has_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+        if has_cuda:
             cuda_radio.SetValue(True)
+        elif has_mps:
+            mps_radio.SetValue(True)
         else:
             cpu_radio.SetValue(True)
-            # cuda_radio.Disable()
         sizer.Add(engine_label, pos=(0, 0), flag=wx.ALL, border=border)
         sizer.Add(engine_radio_panel, pos=(0, 1), flag=wx.ALL, border=border)
         engine_radio_panel_sizer = wx.BoxSizer(wx.HORIZONTAL)
         engine_radio_panel.SetSizer(engine_radio_panel_sizer)
         engine_radio_panel_sizer.Add(cpu_radio, 0, wx.ALL, 5)
         engine_radio_panel_sizer.Add(cuda_radio, 0, wx.ALL, 5)
+        engine_radio_panel_sizer.Add(mps_radio, 0, wx.ALL, 5)
         cpu_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cpu'))
         cuda_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('cuda'))
+        mps_radio.Bind(wx.EVT_RADIOBUTTON, lambda event: torch.set_default_device('mps'))
 
         # Create a list of voices with flags
         flag_and_voice_list = []

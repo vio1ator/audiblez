@@ -109,11 +109,11 @@ For more detaila about voice quality, check this document: [Kokoro-82M voices](h
 
 ## How to run on GPU
 
-By default, audiblez runs on CPU. If you pass the option `--cuda` it will try to use the Cuda device via Torch.
+By default, audiblez runs on CPU. If you pass the option `--cuda` it will try to use the CUDA device via Torch. On Apple Silicon, you can pass `--mps` to use the Metal (MPS) backend via Torch.
 
 Check out this example: [Audiblez running on a Google Colab Notebook with Cuda ](https://colab.research.google.com/drive/164PQLowogprWQpRjKk33e-8IORAvqXKI?usp=sharing]).
 
-We don't currently support Apple Silicon, as there is not yet a Kokoro implementation in MLX. As soon as it will be available, we will support it.
+Apple Silicon is supported via PyTorch MPS. There is no MLX backend for Kokoro here; use `--mps` (CLI) or select MPS in the GUI.
 
 ## Manually pick chapters to convert
 

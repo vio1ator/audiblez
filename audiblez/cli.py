@@ -19,7 +19,8 @@ def cli_main():
     parser.add_argument('-v', '--voice', default=default_voice, help=f'Choose narrating voice: {voices_str}')
     parser.add_argument('-p', '--pick', default=False, help=f'Interactively select which chapters to read in the audiobook', action='store_true')
     parser.add_argument('-s', '--speed', default=1.0, help=f'Set speed from 0.5 to 2.0', type=float)
-    parser.add_argument('-c', '--cuda', default=False, help=f'Use GPU via Cuda in Torch if available', action='store_true')
+    parser.add_argument('-c', '--cuda', default=False, help=f'Use GPU via CUDA (Torch) if available', action='store_true')
+    parser.add_argument('--mps', default=False, help='Use Apple GPU via MPS (Torch) if available', action='store_true')
     parser.add_argument('-o', '--output', default='.', help='Output folder for the audiobook and temporary files', metavar='FOLDER')
 
     if len(sys.argv) == 1:
@@ -27,13 +28,23 @@ def cli_main():
         sys.exit(1)
     args = parser.parse_args()
 
-    if args.cuda:
-        import torch.cuda
-        if torch.cuda.is_available():
-            print('CUDA GPU available')
-            torch.set_default_device('cuda')
+    # Device selection: CUDA, MPS, or CPU
+    if args.cuda or args.mps:
+        import torch
+        chosen = None
+        if args.cuda and args.mps:
+            print('Both --cuda and --mps specified; preferring CUDA if available, otherwise MPS.')
+        if args.cuda and torch.cuda.is_available():
+            chosen = 'cuda'
+        elif args.mps and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            chosen = 'mps'
+        elif args.cuda and not torch.cuda.is_available() and args.mps and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            chosen = 'mps'
+        if chosen:
+            torch.set_default_device(chosen)
+            print(f'Using device: {chosen}')
         else:
-            print('CUDA GPU not available. Defaulting to CPU')
+            print('Requested GPU not available. Using CPU.')
 
     from core import main
     main(args.epub_file_path, args.voice, args.pick, args.speed, args.output)

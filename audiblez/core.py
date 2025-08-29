@@ -28,12 +28,24 @@ from ebooklib import epub
 from pick import pick
 
 sample_rate = 24000
+_NLP = None  # cached spaCy model
 
 
 def load_spacy():
-    if not spacy.util.is_package("xx_ent_wiki_sm"):
-        print("Downloading Spacy model xx_ent_wiki_sm...")
-        spacy.cli.download("xx_ent_wiki_sm")
+    """Ensure the multilingual spaCy model is available and cached."""
+    global _NLP
+    try:
+        if not spacy.util.is_package("xx_ent_wiki_sm"):
+            print("Downloading Spacy model xx_ent_wiki_sm...")
+            spacy.cli.download("xx_ent_wiki_sm")
+        if _NLP is None:
+            _NLP = spacy.load('xx_ent_wiki_sm')
+            # Ensure sentence segmentation is available
+            if 'sentencizer' not in _NLP.pipe_names:
+                _NLP.add_pipe('sentencizer')
+    except Exception:
+        traceback.print_exc()
+        raise
 
 
 def set_espeak_library():
@@ -194,23 +206,57 @@ def print_selected_chapters(document_chapters, chapters):
     ], headers=['#', 'Chapter', 'Text Length', 'Selected', 'First words']))
 
 
-def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None):
-    nlp = spacy.load('xx_ent_wiki_sm')
-    nlp.add_pipe('sentencizer')
+def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None, chunk_chars=1500):
+    """Generate audio for the given text using Kokoro.
+
+    Improvements for Apple Silicon performance:
+    - Reuses a cached spaCy model for sentence splitting.
+    - Batches multiple sentences into chunks up to `chunk_chars` to reduce
+      per-call overhead and keep the GPU busier.
+    """
+    load_spacy()
+    nlp = _NLP
     audio_segments = []
     doc = nlp(text)
     sentences = list(doc.sents)
-    for i, sent in enumerate(sentences):
-        if max_sentences and i > max_sentences: break
-        for gs, ps, audio in pipeline(sent.text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
+
+    # Prepare chunks of sentences up to `chunk_chars` characters.
+    cur_chunk = []
+    cur_len = 0
+    emitted_sentences = 0
+
+    def flush_chunk():
+        nonlocal cur_chunk, cur_len, emitted_sentences
+        if not cur_chunk:
+            return
+        buffer_text = ' '.join(cur_chunk)
+        for gs, ps, audio in pipeline(buffer_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
             audio_segments.append(audio)
         if stats:
-            stats.processed_chars += len(sent.text)
+            stats.processed_chars += len(buffer_text)
             stats.progress = stats.processed_chars * 100 // stats.total_chars
             stats.eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
             if post_event: post_event('CORE_PROGRESS', stats=stats)
             print(f'Estimated time remaining: {stats.eta}')
             print('Progress:', f'{stats.progress}%\n')
+        cur_chunk = []
+        cur_len = 0
+
+    for i, sent in enumerate(sentences):
+        if max_sentences and emitted_sentences >= max_sentences:
+            break
+        s = sent.text
+        # If a single sentence is itself longer than chunk_chars, flush current
+        # chunk and emit it alone to avoid starvation.
+        if cur_chunk and (cur_len + len(s) > chunk_chars):
+            flush_chunk()
+        cur_chunk.append(s)
+        cur_len += len(s)
+        emitted_sentences += 1
+
+    # Flush any remaining text
+    flush_chunk()
+
     return audio_segments
 
 

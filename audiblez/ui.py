@@ -279,10 +279,22 @@ class MainWindow(wx.Frame):
         has_mps = hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
         if has_cuda:
             cuda_radio.SetValue(True)
+            try:
+                torch.set_default_device('cuda')
+            except Exception:
+                pass
         elif has_mps:
             mps_radio.SetValue(True)
+            try:
+                torch.set_default_device('mps')
+            except Exception:
+                pass
         else:
             cpu_radio.SetValue(True)
+            try:
+                torch.set_default_device('cpu')
+            except Exception:
+                pass
         sizer.Add(engine_label, pos=(0, 0), flag=wx.ALL, border=border)
         sizer.Add(engine_radio_panel, pos=(0, 1), flag=wx.ALL, border=border)
         engine_radio_panel_sizer = wx.BoxSizer(wx.HORIZONTAL)

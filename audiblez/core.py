@@ -229,7 +229,9 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
         nonlocal cur_chunk, cur_len, emitted_sentences
         if not cur_chunk:
             return
-        buffer_text = ' '.join(cur_chunk)
+        # Join sentences with explicit split markers so Kokoro returns
+        # sentence-aligned segments in a single call.
+        buffer_text = '\n\n\n'.join(cur_chunk)
         for gs, ps, audio in pipeline(buffer_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
             audio_segments.append(audio)
         if stats:

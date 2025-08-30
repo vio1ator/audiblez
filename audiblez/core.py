@@ -26,6 +26,8 @@ from bs4 import BeautifulSoup
 from kokoro import KPipeline
 from ebooklib import epub
 from pick import pick
+import unicodedata
+import string
 
 sample_rate = 24000
 _NLP = None  # cached spaCy model
@@ -306,9 +308,31 @@ def is_chapter(c):
     return has_min_len and title_looks_like_chapter
 
 
+def _sanitize_for_terminal(text: str, max_len: int) -> str:
+    """Return a terminal-safe, ASCII-only, single-line preview.
+
+    - Normalizes to ASCII (drops accents/emojis) to avoid curses wide-char issues.
+    - Collapses whitespace and strips control characters.
+    - Truncates and appends '...' if needed.
+    """
+    if not text:
+        return ''
+    # Normalize and strip non-ASCII
+    s = unicodedata.normalize('NFKD', text)
+    s = s.encode('ascii', 'ignore').decode('ascii')
+    # Collapse newlines/whitespace and strip non-printables
+    s = s.replace('\n', ' ').replace('\r', ' ')
+    s = ' '.join(s.split())
+    s = ''.join(ch for ch in s if ch in string.printable)
+    # Truncate
+    if max_len and len(s) > max_len:
+        s = s[: max_len - 3] + '...'
+    return s
+
+
 def chapter_beginning_one_liner(c, chars=20):
-    s = c.extracted_text[:chars].strip().replace('\n', ' ').replace('\r', ' ')
-    return s + '…' if len(s) > 0 else ''
+    s = c.extracted_text[: chars].strip()
+    return _sanitize_for_terminal(s, chars)
 
 
 def find_good_chapters(document_chapters):
@@ -321,11 +345,20 @@ def find_good_chapters(document_chapters):
 
 def pick_chapters(chapters):
     # Display the document name, the length and first 50 characters of the text
-    chapters_by_names = {
-        f'{c.get_name()}\t({len(c.extracted_text)} chars)\t[{chapter_beginning_one_liner(c, 50)}]': c
-        for c in chapters}
+    chapters_by_names = {}
+    for c in chapters:
+        name = _sanitize_for_terminal(c.get_name(), 60)
+        preview = chapter_beginning_one_liner(c, 50)
+        key = f"{name} ({len(c.extracted_text)} chars) [{preview}]"
+        chapters_by_names[key] = c
     title = 'Select which chapters to read in the audiobook'
-    ret = pick(list(chapters_by_names.keys()), title, multiselect=True, min_selection_count=1)
+    try:
+        ret = pick(list(chapters_by_names.keys()), title, multiselect=True, min_selection_count=1)
+    except Exception as e:
+        # Provide a clearer error and fallback behavior if curses cannot render.
+        print('Error: interactive picker failed to render (terminal too small or unsupported).')
+        print('Tip: enlarge the terminal, use a different terminal app, or run without --pick.')
+        raise
     selected_chapters_out_of_order = [chapters_by_names[r[0]] for r in ret]
     selected_chapters = [c for c in chapters if c in selected_chapters_out_of_order]
     return selected_chapters

@@ -118,19 +118,19 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     if not has_ffmpeg:
         print('\033[91m' + 'ffmpeg not found. Please install ffmpeg to create mp3 and m4b audiobook files.' + '\033[0m')
 
-    accel_available = (
-        torch.cuda.is_available() or
-        (hasattr(torch.backends, 'mps') and torch.backends.mps.is_available())
-    )
+    # Initialize stats with a conservative chars/sec guess and fields used for a
+    # dynamic ETA updated via an exponential moving average (EMA).
     stats = SimpleNamespace(
         total_chars=sum(map(len, texts)),
         processed_chars=0,
-        chars_per_sec=500 if accel_available else 50)
+        chars_per_sec=70.0,   # conservative initial guess
+        ema_alpha=0.30,       # 30% new sample, 70% previous estimate
+        measurements=0)
     print('Started at:', time.strftime('%H:%M:%S'))
     print(f'Total characters: {stats.total_chars:,}')
     print('Total words:', len(' '.join(texts).split()))
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
-    print(f'Estimated time remaining (assuming {stats.chars_per_sec} chars/sec): {eta}')
+    print(f'Estimated time remaining (initial, {stats.chars_per_sec:.0f} chars/sec): {eta}')
     set_espeak_library()
     pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
 
@@ -234,14 +234,25 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
         # Join sentences with explicit split markers so Kokoro returns
         # sentence-aligned segments in a single call.
         buffer_text = '\n\n\n'.join(cur_chunk)
+        start_time = time.time()
         for gs, ps, audio in pipeline(buffer_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
             audio_segments.append(audio)
+        elapsed = max(time.time() - start_time, 1e-6)
         if stats:
-            stats.processed_chars += len(buffer_text)
+            chunk_chars_count = len(buffer_text)
+            stats.processed_chars += chunk_chars_count
+            # Update moving average throughput (chars/sec)
+            try:
+                new_rate = chunk_chars_count / elapsed
+                alpha = getattr(stats, 'ema_alpha', 0.30)
+                stats.chars_per_sec = (1 - alpha) * stats.chars_per_sec + alpha * new_rate
+                stats.measurements = getattr(stats, 'measurements', 0) + 1
+            except Exception:
+                pass
             stats.progress = stats.processed_chars * 100 // stats.total_chars
             stats.eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
             if post_event: post_event('CORE_PROGRESS', stats=stats)
-            print(f'Estimated time remaining: {stats.eta}')
+            print(f'Estimated time remaining: {stats.eta} (rate {stats.chars_per_sec:.0f} chars/sec)')
             print('Progress:', f'{stats.progress}%\n')
         cur_chunk = []
         cur_len = 0

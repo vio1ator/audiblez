@@ -23,7 +23,8 @@ from tabulate import tabulate
 from pathlib import Path
 from string import Formatter
 from bs4 import BeautifulSoup
-from kokoro import KPipeline
+# Backends (Kokoro / MLX-Audio)
+from .tts_backends import create_pipeline
 from ebooklib import epub
 from pick import pick
 import unicodedata
@@ -84,7 +85,8 @@ def set_espeak_library():
 
 
 def main(file_path, voice, pick_manually, speed, output_folder='.',
-         max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None):
+         max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
+         backend='mlx', mlx_model='mlx-community/Kokoro-82M-4bit'):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
     if output_folder != '.':
@@ -131,8 +133,17 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     print('Total words:', len(' '.join(texts).split()))
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
     print(f'Estimated time remaining (initial, {stats.chars_per_sec:.0f} chars/sec): {eta}')
-    set_espeak_library()
-    pipeline = KPipeline(lang_code=voice[0])  # a for american or b for british etc.
+    # Build TTS pipeline
+    if backend == 'kokoro':
+        set_espeak_library()
+    try:
+        pipeline = create_pipeline(backend, voice, mlx_model)
+        print(f'Using TTS backend: {backend} (model: {mlx_model if backend == "mlx" else "kokoro"})')
+    except Exception:
+        traceback.print_exc()
+        print('Falling back to Kokoro backend.')
+        set_espeak_library()
+        pipeline = create_pipeline('kokoro', voice, mlx_model)
 
     chapter_wav_files = []
     for i, chapter in enumerate(selected_chapters, start=1):
@@ -157,7 +168,8 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
         start_time = time.time()
         if post_event: post_event('CORE_CHAPTER_STARTED', chapter_index=chapter.chapter_index)
         audio_segments = gen_audio_segments(
-            pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences)
+            pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
+            backend=backend, mlx_model=mlx_model)
         if audio_segments:
             final_audio = np.concatenate(audio_segments)
             soundfile.write(chapter_wav_path, final_audio, sample_rate)
@@ -208,7 +220,8 @@ def print_selected_chapters(document_chapters, chapters):
     ], headers=['#', 'Chapter', 'Text Length', 'Selected', 'First words']))
 
 
-def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None, chunk_chars=1500):
+def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None, chunk_chars=1500,
+                       backend='kokoro', mlx_model='mlx-community/Kokoro-82M-4bit'):
     """Generate audio for the given text using Kokoro.
 
     Improvements for Apple Silicon performance:
@@ -235,8 +248,30 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
         # sentence-aligned segments in a single call.
         buffer_text = '\n\n\n'.join(cur_chunk)
         start_time = time.time()
-        for gs, ps, audio in pipeline(buffer_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
-            audio_segments.append(audio)
+        try:
+            for gs, ps, audio in pipeline(buffer_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
+                audio_segments.append(audio)
+        except Exception as e:
+            # Only auto-fallback when backend was auto-selected (not explicitly 'mlx')
+            if backend == 'auto':
+                print('MLX backend failed on a chunk; falling back to Kokoro. Reason:', str(e))
+                try:
+                    set_espeak_library()
+                except Exception:
+                    pass
+                try:
+                    fb = create_pipeline('kokoro', voice, mlx_model)
+                    for gs, ps, audio in fb(buffer_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
+                        audio_segments.append(audio)
+                    # Replace pipeline for subsequent chunks
+                    nonlocal_pipeline[0] = fb
+                except Exception:
+                    traceback.print_exc()
+                    raise
+            else:
+                # Surface the exact MLX error to the user
+                print('MLX backend error details:', str(e))
+                raise
         elapsed = max(time.time() - start_time, 1e-6)
         if stats:
             chunk_chars_count = len(buffer_text)
@@ -257,6 +292,9 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
         cur_chunk = []
         cur_len = 0
 
+    # A small indirection to allow replacing the pipeline on fallback.
+    nonlocal_pipeline = [pipeline]
+
     for i, sent in enumerate(sentences):
         if max_sentences and emitted_sentences >= max_sentences:
             break
@@ -270,16 +308,19 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
         emitted_sentences += 1
 
     # Flush any remaining text
+    # Use the potentially replaced pipeline for the final flush
+    pipeline = nonlocal_pipeline[0]
     flush_chunk()
 
     return audio_segments
 
 
-def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False):
-    lang_code = voice[:1]
-    pipeline = KPipeline(lang_code=lang_code)
+def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False, backend='kokoro', mlx_model='mlx-community/Kokoro-82M-4bit'):
+    if backend == 'kokoro':
+        set_espeak_library()
+    pipeline = create_pipeline(backend, voice, mlx_model)
     load_spacy()
-    audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed);
+    audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed, backend=backend, mlx_model=mlx_model)
     final_audio = np.concatenate(audio_segments)
     soundfile.write(output_file, final_audio, sample_rate)
     if play:

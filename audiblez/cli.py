@@ -3,6 +3,7 @@ import argparse
 import sys
 
 from audiblez.voices import voices, available_voices_str
+import platform
 
 
 def cli_main():
@@ -22,6 +23,11 @@ def cli_main():
     parser.add_argument('-c', '--cuda', default=False, help=f'Use GPU via CUDA (Torch) if available', action='store_true')
     parser.add_argument('--mps', default=False, help='Use Apple GPU via MPS (Torch) if available', action='store_true')
     parser.add_argument('-o', '--output', default='.', help='Output folder for the audiobook and temporary files', metavar='FOLDER')
+    # TTS backend selection
+    default_backend = 'mlx' if platform.system() == 'Darwin' and platform.machine() in ('arm64', 'aarch64') else 'kokoro'
+    parser.add_argument('--backend', choices=['auto', 'mlx', 'kokoro'], default='auto', help='TTS backend: mlx (MLX-Audio), kokoro (original), or auto')
+    parser.add_argument('--mlx-model', default='mlx-community/Kokoro-82M-4bit', help='MLX model id or path (default: 4-bit Kokoro)')
+    parser.add_argument('--mlx-exec', default=None, help='Path to MLX-Audio executable (mlx-audio). Overrides PATH lookup')
 
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
@@ -46,8 +52,16 @@ def cli_main():
         else:
             print('Requested GPU not available. Using CPU.')
 
-    from core import main
-    main(args.epub_file_path, args.voice, args.pick, args.speed, args.output)
+    from .core import main
+    # Resolve backend preference
+    backend_pref = args.backend
+    if backend_pref == 'auto':
+        backend_pref = default_backend
+    # Optionally override MLX exec path for this run
+    if args.mlx_exec:
+        import os
+        os.environ['MLX_AUDIO_EXE'] = args.mlx_exec
+    main(args.epub_file_path, args.voice, args.pick, args.speed, args.output, backend=backend_pref, mlx_model=args.mlx_model)
 
 
 if __name__ == '__main__':

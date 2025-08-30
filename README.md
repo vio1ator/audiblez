@@ -120,14 +120,14 @@ Apple Silicon is supported via PyTorch MPS. There is no MLX backend for Kokoro h
 On macOS with Apple Silicon, audiblez now prefers an MLX‑Audio backend using a 4‑bit Kokoro model by default. This reduces memory and improves latency on M‑series Macs.
 
 - Install extras: `pip install "audiblez[mlx]"`
-- Default model: `mlx-community/Kokoro-82M-4bit`
+- Default model: `mlx-community/Kokoro-82M-8bit`
 - CLI auto‑selects MLX on Apple Silicon; override with `--backend kokoro` or choose a different MLX model via `--mlx-model`.
 
 Examples:
 
 ```
 audiblez book.epub --voice af_sky                          # MLX on Apple Silicon, Kokoro elsewhere
-audiblez book.epub --backend mlx --mlx-model mlx-community/Kokoro-82M-4bit
+audiblez book.epub --backend mlx --mlx-model mlx-community/Kokoro-82M-8bit
 audiblez book.epub --backend kokoro                        # force original backend
 ```
 

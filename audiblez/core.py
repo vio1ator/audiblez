@@ -86,7 +86,7 @@ def set_espeak_library():
 
 def main(file_path, voice, pick_manually, speed, output_folder='.',
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
-         backend='mlx', mlx_model='mlx-community/Kokoro-82M-4bit'):
+         backend='mlx', mlx_model='mlx-community/Kokoro-82M-8bit'):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
     if output_folder != '.':
@@ -315,7 +315,7 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     return audio_segments
 
 
-def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False, backend='kokoro', mlx_model='mlx-community/Kokoro-82M-4bit'):
+def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False, backend='kokoro', mlx_model='mlx-community/Kokoro-82M-8bit'):
     if backend == 'kokoro':
         set_espeak_library()
     pipeline = create_pipeline(backend, voice, mlx_model)

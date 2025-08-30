@@ -26,7 +26,7 @@ def cli_main():
     # TTS backend selection
     default_backend = 'mlx' if platform.system() == 'Darwin' and platform.machine() in ('arm64', 'aarch64') else 'kokoro'
     parser.add_argument('--backend', choices=['auto', 'mlx', 'kokoro'], default='auto', help='TTS backend: mlx (MLX-Audio), kokoro (original), or auto')
-    parser.add_argument('--mlx-model', default='mlx-community/Kokoro-82M-4bit', help='MLX model id or path (default: 4-bit Kokoro)')
+    parser.add_argument('--mlx-model', default='mlx-community/Kokoro-82M-8bit', help='MLX model id or path (default: 8-bit Kokoro)')
     parser.add_argument('--mlx-exec', default=None, help='Path to MLX-Audio executable (mlx-audio). Overrides PATH lookup')
 
     if len(sys.argv) == 1:

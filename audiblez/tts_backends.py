@@ -40,7 +40,7 @@ class MlxAudioPipeline:
     same.
     """
 
-    def __init__(self, model: str = "mlx-community/Kokoro-82M-4bit", sample_rate: int = 24000) -> None:
+    def __init__(self, model: str = "mlx-community/Kokoro-82M-8bit", sample_rate: int = 24000) -> None:
         self.model = model
         self.sample_rate = sample_rate
         self.exe_override = os.environ.get('MLX_AUDIO_EXE')

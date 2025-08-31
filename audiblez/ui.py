@@ -513,6 +513,31 @@ class MainWindow(wx.Frame):
         sizer = wx.BoxSizer(wx.VERTICAL)
         panel.SetSizer(sizer)
 
+        # Controls row: bulk selection actions
+        controls_row = wx.Panel(panel)
+        controls_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        controls_row.SetSizer(controls_sizer)
+
+        select_all_btn = wx.Button(controls_row, label="Select All")
+        deselect_all_btn = wx.Button(controls_row, label="Deselect All")
+        threshold_label = wx.StaticText(controls_row, label="Select > ")
+        threshold_spin = wx.SpinCtrl(controls_row, min=0, max=2_000_000, initial=1000)
+        threshold_suffix = wx.StaticText(controls_row, label=" chars")
+        select_threshold_btn = wx.Button(controls_row, label="Apply")
+
+        controls_sizer.Add(select_all_btn, 0, wx.ALL, 2)
+        controls_sizer.Add(deselect_all_btn, 0, wx.ALL, 2)
+        controls_sizer.AddSpacer(10)
+        controls_sizer.Add(threshold_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        controls_sizer.Add(threshold_spin, 0, wx.ALL, 2)
+        controls_sizer.Add(threshold_suffix, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        controls_sizer.Add(select_threshold_btn, 0, wx.ALL, 2)
+
+        # Bind actions
+        select_all_btn.Bind(wx.EVT_BUTTON, lambda evt: self.bulk_select(True))
+        deselect_all_btn.Bind(wx.EVT_BUTTON, lambda evt: self.bulk_select(False))
+        select_threshold_btn.Bind(wx.EVT_BUTTON, lambda evt: self.bulk_select_threshold(threshold_spin.GetValue()))
+
         self.table = table = wx.ListCtrl(panel, style=wx.LC_REPORT | wx.BORDER_SUNKEN)
         table.InsertColumn(0, "Included")
         table.InsertColumn(1, "Chapter Name")
@@ -535,8 +560,51 @@ class MainWindow(wx.Frame):
 
         title_text = wx.StaticText(panel, label=f"Select chapters to include in the audiobook:")
         sizer.Add(title_text, 0, wx.ALL, 5)
+        sizer.Add(controls_row, 0, wx.ALL, 5)
         sizer.Add(table, 1, wx.ALL | wx.EXPAND, 5)
         return panel
+
+    def bulk_select(self, value: bool):
+        # Update the model and the UI checkboxes
+        if not hasattr(self, 'table'):
+            return
+        self.table.Freeze()
+        try:
+            for i, chapter in enumerate(self.document_chapters):
+                chapter.is_selected = value
+                try:
+                    # wxPython Phoenix supports setting the state with the 'checked' arg
+                    self.table.CheckItem(i, value)
+                except TypeError:
+                    # Fallback for environments where CheckItem only checks
+                    if value:
+                        self.table.CheckItem(i)
+                    else:
+                        # No direct uncheck available in some builds; simulate by toggling
+                        if self.table.IsItemChecked(i):
+                            self.table.CheckItem(i)
+        finally:
+            self.table.Thaw()
+
+    def bulk_select_threshold(self, min_chars: int):
+        # Select only chapters/pages whose extracted text length >= min_chars
+        if not hasattr(self, 'table'):
+            return
+        self.table.Freeze()
+        try:
+            for i, chapter in enumerate(self.document_chapters):
+                sel = len(getattr(chapter, 'extracted_text', '') or '') >= int(min_chars)
+                chapter.is_selected = sel
+                try:
+                    self.table.CheckItem(i, sel)
+                except TypeError:
+                    if sel:
+                        self.table.CheckItem(i)
+                    else:
+                        if self.table.IsItemChecked(i):
+                            self.table.CheckItem(i)
+        finally:
+            self.table.Thaw()
 
     def get_selected_voice(self):
         return self.selected_voice.split(' ')[1]

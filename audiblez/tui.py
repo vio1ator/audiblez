@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import List, Optional, Tuple, Set
+import shutil
 
 import platform
 
@@ -339,7 +340,7 @@ def _preview_loop(chapters, voice: str, speed: float, backend: str, mlx_model: s
         opts = [f"{i+1}. {getattr(c, 'get_name', lambda: f'Chapter {i+1}')()}" for i, c in enumerate(chapters)]
         opts.append("[Done]")
         try:
-            choice, idx = pick(opts, "Select a chapter/page to preview", multiselect=False, min_selection_count=1)
+            choice, idx = select_with_letter_jump(opts, "Select a chapter/page to preview", jump_to_folders=False)
         except Exception as e:
             print("Preview selection failed:", e)
             return
@@ -352,7 +353,8 @@ def _preview_loop(chapters, voice: str, speed: float, backend: str, mlx_model: s
             continue
         try:
             tmp = NamedTemporaryFile(suffix='.wav', delete=False)
-            core.gen_text(text, voice=voice, output_file=tmp.name, speed=speed, play=True, backend=backend, mlx_model=mlx_model)
+            core.gen_text(text, voice=voice, output_file=tmp.name, speed=speed, play=False, backend=backend, mlx_model=mlx_model)
+            _play_audio_blocking(tmp.name)
             try:
                 os.unlink(tmp.name)
             except Exception:
@@ -410,10 +412,21 @@ def main():
         all_chapters, selected = _select_chapters_for_epub(book)
 
     # Offer previews
-    try:
-        do_prev, _ = pick(["Yes", "No"], "Preview chapters/pages before starting?", multiselect=False, min_selection_count=1)
-    except Exception:
+    do_prev, _ = select_with_letter_jump(["Yes", "No"], "Preview chapters/pages before starting?", jump_to_folders=False)
+    if do_prev is None:
         do_prev = "No"
+    if do_prev == "Yes":
+        _preview_loop(selected, voice, speed, backend, mlx_model)
+
+    print("Starting synthesis...\n")
+    core.main(
+        str(ebook), voice, pick_manually=False, speed=speed,
+        output_folder=str(out_dir), selected_chapters=selected,
+        backend=backend, mlx_model=mlx_model,
+        header=margins.get('header', 0.07), footer=margins.get('footer', 0.07),
+        left=margins.get('left', 0.07), right=margins.get('right', 0.07),
+        post_event=_post_event,
+    )
 
 
 def select_with_letter_jump(options: List[str], title: str, jump_to_folders: bool = True, start_index: int = 0):
@@ -452,7 +465,11 @@ def select_with_letter_jump(options: List[str], title: str, jump_to_folders: boo
                 stdscr.addstr(0, 0, title_str, curses.A_BOLD)
             except curses.error:
                 pass
-            hint = "Arrows/jk move • letters jump to folder • Enter select • q quit"
+            hint = (
+                "Arrows/jk move • letters jump to folder • Enter select • q quit"
+                if jump_to_folders else
+                "Arrows/jk move • letters jump • Enter select • q quit"
+            )
             try:
                 stdscr.addstr(1, 0, hint[: max(0, w - 1)])
             except curses.error:
@@ -515,6 +532,24 @@ def select_with_letter_jump(options: List[str], title: str, jump_to_folders: boo
     if res is None:
         return None, None
     return options[res], res
+
+
+def _play_audio_blocking(path: str):
+    # Prefer ffplay if available, otherwise use platform-appropriate players.
+    if shutil.which('ffplay'):
+        subprocess.run(['ffplay', '-autoexit', '-nodisp', path])
+        return
+    if platform.system() == 'Darwin' and shutil.which('afplay'):
+        subprocess.run(['afplay', path])
+        return
+    if platform.system() == 'Linux' and shutil.which('aplay'):
+        subprocess.run(['aplay', path])
+        return
+    # Last resort: try vlc
+    if shutil.which('cvlc'):
+        subprocess.run(['cvlc', '--play-and-exit', path])
+        return
+    print('No suitable audio player found (ffplay/afplay/aplay/cvlc).')
     if do_prev == "Yes":
         _preview_loop(selected, voice, speed, backend, mlx_model)
 

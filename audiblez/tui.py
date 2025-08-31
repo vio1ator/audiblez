@@ -20,7 +20,7 @@ import fnmatch
 import subprocess
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Set
 
 import platform
 
@@ -154,40 +154,183 @@ def _select_chapters_for_epub(book) -> List:
     chapters = find_document_chapters_and_extract_texts(book)
     good = find_good_chapters(chapters)
     labels = []
-    by_label = {}
+    lengths = []
     for c in chapters:
         name = c.get_name()
         prev = chapter_beginning_one_liner(c, 50)
-        key = f"{name} ({len(c.extracted_text)} chars) [{prev}]"
-        by_label[key] = c
-        labels.append(key)
-    title = "Space to toggle, Enter to accept. Select chapters/pages"
-    try:
-        selected = pick(labels, title, multiselect=True, min_selection_count=1)
-    except Exception:
-        print("Picker failed to render. Try enlarging terminal or different terminal app.")
-        raise
-    selected_objs = [by_label[it[0]] for it in selected]
-    # Preserve doc order
-    selected_objs = [c for c in chapters if c in selected_objs]
+        labels.append(f"{name} ({len(c.extracted_text)} chars) [{prev}]")
+        lengths.append(len(c.extracted_text))
+    # Preselect good chapters
+    initial = {i for i, c in enumerate(chapters) if c in good}
+    title = "Select chapters: Space toggle • a:All • n:None • t:Min chars • Enter accept • q quit"
+    idxs = multiselect_with_controls(labels, title, initial_selected=initial, lengths=lengths)
+    selected_objs = [chapters[i] for i in idxs]
     return chapters, selected_objs
 
 
 def _select_chapters_for_pdf(pages) -> List:
     labels = []
+    lengths = []
     for p in pages:
         prev = (p.extracted_text or "").strip().splitlines()[0:1]
         prev = prev[0][:50] + ('...' if len(prev[0]) > 50 else '') if prev else ''
         labels.append(f"{p.get_name()} ({len(p.extracted_text)} chars) [{prev}]")
-    title = "Space to toggle, Enter to accept. Select pages"
-    try:
-        selected = pick(labels, title, multiselect=True, min_selection_count=1)
-    except Exception:
-        print("Picker failed to render. Try enlarging terminal or different terminal app.")
-        raise
-    idxs = [i for (_, i) in selected]
+        lengths.append(len(p.extracted_text or ""))
+    # Default: select all pages initially
+    initial = set(range(len(pages)))
+    title = "Select pages: Space toggle • a:All • n:None • t:Min chars • Enter accept • q quit"
+    idxs = multiselect_with_controls(labels, title, initial_selected=initial, lengths=lengths)
     selected_pages = [p for i, p in enumerate(pages) if i in idxs]
     return pages, selected_pages
+
+
+def multiselect_with_controls(options: List[str], title: str, initial_selected: Optional[Set[int]] = None, lengths: Optional[List[int]] = None) -> List[int]:
+    """Curses multiselect with select-all/none and min-length selection.
+
+    Keys: arrows/jk move, space toggle, a select all, n select none, t set min chars,
+    letters jump, Enter accept (requires >=1), q cancel.
+    Returns selected indices list.
+    """
+    try:
+        import curses
+    except Exception:
+        # Fallback to pick's multiselect (without advanced shortcuts)
+        try:
+            selected = pick(options, title, multiselect=True, min_selection_count=1)
+            return [i for (_, i) in selected]
+        except Exception as e2:
+            print("Selection failed:", e2)
+            raise
+
+    initial_selected = set(initial_selected or set())
+
+    def _prompt_threshold(stdscr) -> Optional[int]:
+        h, w = stdscr.getmaxyx()
+        prompt = "Min chars: "
+        buf = ""
+        while True:
+            stdscr.move(h - 1, 0)
+            stdscr.clrtoeol()
+            try:
+                stdscr.addstr(h - 1, 0, prompt + buf)
+            except curses.error:
+                pass
+            ch = stdscr.getch()
+            if ch in (10, 13):
+                try:
+                    return int(buf) if buf else None
+                except Exception:
+                    return None
+            elif ch in (27,):
+                return None
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                buf = buf[:-1]
+            elif 48 <= ch <= 57:  # digits
+                if len(buf) < 9:
+                    buf += chr(ch)
+
+    def _run(stdscr):
+        curses.curs_set(0)
+        stdscr.keypad(True)
+        idx = 0
+        top = 0
+        selected: Set[int] = set(initial_selected)
+        message = ""
+        while True:
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            vis_h = max(1, h - 4)
+            # Adjust scrolling window
+            if idx < top:
+                top = idx
+            elif idx >= top + vis_h:
+                top = idx - vis_h + 1
+
+            # Title and help
+            title_str = (title or "")[: max(0, w - 1)]
+            try:
+                stdscr.addstr(0, 0, title_str, curses.A_BOLD)
+            except curses.error:
+                pass
+            hint = "Space toggle • a All • n None • t Min chars • Enter accept • q quit"
+            try:
+                stdscr.addstr(1, 0, hint[: max(0, w - 1)])
+            except curses.error:
+                pass
+            status = f"Selected {len(selected)}/{len(options)}"
+            try:
+                stdscr.addstr(2, 0, status[: max(0, w - 1)])
+            except curses.error:
+                pass
+
+            # Render list
+            for row in range(vis_h):
+                j = top + row
+                if j >= len(options):
+                    break
+                is_sel = j in selected
+                checkbox = "[x]" if is_sel else "[ ]"
+                line = options[j]
+                text = f"{checkbox} {line}"
+                try:
+                    stdscr.addstr(3 + row, 0, text[: max(0, w - 1)], curses.A_REVERSE if j == idx else curses.A_NORMAL)
+                except curses.error:
+                    pass
+
+            if message:
+                try:
+                    stdscr.addstr(h - 2, 0, message[: max(0, w - 1)], curses.A_DIM)
+                except curses.error:
+                    pass
+
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            message = ""
+            if key in (curses.KEY_UP, ord('k')):
+                idx = max(0, idx - 1)
+            elif key in (curses.KEY_DOWN, ord('j')):
+                idx = min(len(options) - 1, idx + 1)
+            elif key == curses.KEY_PPAGE:
+                idx = max(0, idx - vis_h)
+            elif key == curses.KEY_NPAGE:
+                idx = min(len(options) - 1, idx + vis_h)
+            elif key in (32,):  # space
+                if idx in selected:
+                    selected.remove(idx)
+                else:
+                    selected.add(idx)
+            elif key in (ord('a'),):
+                selected = set(range(len(options)))
+            elif key in (ord('n'),):
+                selected.clear()
+            elif key in (ord('t'),):
+                thr = _prompt_threshold(stdscr)
+                if thr is not None and lengths is not None:
+                    selected = {i for i, L in enumerate(lengths) if L >= thr}
+                elif thr is None:
+                    message = "Threshold canceled"
+                else:
+                    message = "No lengths available"
+            elif key in (10, 13, curses.KEY_ENTER):
+                if len(selected) >= 1:
+                    return sorted(selected)
+                else:
+                    message = "Select at least 1 item"
+            elif key in (27, ord('q')):
+                return None
+            elif 32 <= key <= 126:
+                ch = chr(key)
+                # Jump to first entry starting with letter
+                for k, s in enumerate(options):
+                    if s.lower().startswith(ch.lower()):
+                        idx = k
+                        break
+
+    res = __import__('curses').wrapper(_run)
+    if res is None:
+        raise RuntimeError("Selection canceled")
+    return res
 
 
 def _preview_loop(chapters, voice: str, speed: float, backend: str, mlx_model: str):

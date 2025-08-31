@@ -16,7 +16,7 @@ def cli_main():
               available_voices_str)
     default_voice = 'af_sky'
     parser = argparse.ArgumentParser(epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('epub_file_path', help='Path to the epub file')
+    parser.add_argument('epub_file_path', help='Path to the EPUB or PDF file')
     parser.add_argument('-v', '--voice', default=default_voice, help=f'Choose narrating voice: {voices_str}')
     parser.add_argument('-p', '--pick', default=False, help=f'Interactively select which chapters to read in the audiobook', action='store_true')
     parser.add_argument('-s', '--speed', default=1.0, help=f'Set speed from 0.5 to 2.0', type=float)
@@ -28,6 +28,19 @@ def cli_main():
     parser.add_argument('--backend', choices=['auto', 'mlx', 'kokoro'], default='auto', help='TTS backend: mlx (MLX-Audio), kokoro (original), or auto')
     parser.add_argument('--mlx-model', default='mlx-community/Kokoro-82M-8bit', help='MLX model id or path (default: 8-bit Kokoro)')
     parser.add_argument('--mlx-exec', default=None, help='Path to MLX-Audio executable (mlx-audio). Overrides PATH lookup')
+    # PDF extraction margins
+    def _margin(v: str):
+        try:
+            x = float(v)
+        except Exception:
+            raise argparse.ArgumentTypeError('Margin must be a float in [0, 0.3]')
+        if not (0.0 <= x <= 0.3):
+            raise argparse.ArgumentTypeError('Margin must be in [0, 0.3]')
+        return x
+    parser.add_argument('--header', type=_margin, default=0.07, help='Top margin fraction for PDF trimming (0–0.3)')
+    parser.add_argument('--footer', type=_margin, default=0.07, help='Bottom margin fraction for PDF trimming (0–0.3)')
+    parser.add_argument('--left', type=_margin, default=0.07, help='Left margin fraction for PDF trimming (0–0.3)')
+    parser.add_argument('--right', type=_margin, default=0.07, help='Right margin fraction for PDF trimming (0–0.3)')
 
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
@@ -61,7 +74,19 @@ def cli_main():
     if args.mlx_exec:
         import os
         os.environ['MLX_AUDIO_EXE'] = args.mlx_exec
-    main(args.epub_file_path, args.voice, args.pick, args.speed, args.output, backend=backend_pref, mlx_model=args.mlx_model)
+    main(
+        args.epub_file_path,
+        args.voice,
+        args.pick,
+        args.speed,
+        args.output,
+        backend=backend_pref,
+        mlx_model=args.mlx_model,
+        header=args.header,
+        footer=args.footer,
+        left=args.left,
+        right=args.right,
+    )
 
 
 if __name__ == '__main__':

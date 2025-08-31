@@ -86,7 +86,8 @@ def set_espeak_library():
 
 def main(file_path, voice, pick_manually, speed, output_folder='.',
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
-         backend='mlx', mlx_model='mlx-community/Kokoro-82M-8bit'):
+         backend='mlx', mlx_model='mlx-community/Kokoro-82M-8bit',
+         header: float = 0.07, footer: float = 0.07, left: float = 0.07, right: float = 0.07):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
     if output_folder != '.':
@@ -94,25 +95,47 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
 
     filename = Path(file_path).name
 
-    extension = '.epub'
-    book = epub.read_epub(file_path)
-    meta_title = book.get_metadata('DC', 'title')
-    title = meta_title[0][0] if meta_title else ''
-    meta_creator = book.get_metadata('DC', 'creator')
-    creator = meta_creator[0][0] if meta_creator else ''
+    # Branch by file type (EPUB vs PDF)
+    extension = Path(file_path).suffix.lower()
+    if extension == '.pdf':
+        # PDF: extract per-page chapters via PyMuPDF
+        from .pdf import extract_pages
+        title = Path(file_path).stem
+        creator = ''
+        cover_image = b''
+        document_chapters = extract_pages(file_path, {
+            'header': max(0.0, min(0.3, float(header))),
+            'footer': max(0.0, min(0.3, float(footer))),
+            'left': max(0.0, min(0.3, float(left))),
+            'right': max(0.0, min(0.3, float(right))),
+        })
+        # Default: select all pages unless picking manually
+        if not selected_chapters:
+            if pick_manually is True:
+                selected_chapters = pick_chapters(document_chapters)
+            else:
+                selected_chapters = document_chapters
+    else:
+        # EPUB default path
+        extension = '.epub'
+        book = epub.read_epub(file_path)
+        meta_title = book.get_metadata('DC', 'title')
+        title = meta_title[0][0] if meta_title else ''
+        meta_creator = book.get_metadata('DC', 'creator')
+        creator = meta_creator[0][0] if meta_creator else ''
 
-    cover_maybe = find_cover(book)
-    cover_image = cover_maybe.get_content() if cover_maybe else b""
-    if cover_maybe:
-        print(f'Found cover image {cover_maybe.file_name} in {cover_maybe.media_type} format')
+        cover_maybe = find_cover(book)
+        cover_image = cover_maybe.get_content() if cover_maybe else b""
+        if cover_maybe:
+            print(f'Found cover image {cover_maybe.file_name} in {cover_maybe.media_type} format')
 
-    document_chapters = find_document_chapters_and_extract_texts(book)
+        document_chapters = find_document_chapters_and_extract_texts(book)
 
-    if not selected_chapters:
-        if pick_manually is True:
-            selected_chapters = pick_chapters(document_chapters)
-        else:
-            selected_chapters = find_good_chapters(document_chapters)
+        if not selected_chapters:
+            if pick_manually is True:
+                selected_chapters = pick_chapters(document_chapters)
+            else:
+                selected_chapters = find_good_chapters(document_chapters)
     print_selected_chapters(document_chapters, selected_chapters)
     texts = [c.extracted_text for c in selected_chapters]
 
@@ -150,7 +173,8 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
         if max_chapters and i > max_chapters: break
         text = chapter.extracted_text
         xhtml_file_name = chapter.get_name().replace(' ', '_').replace('/', '_').replace('\\', '_')
-        chapter_wav_path = Path(output_folder) / filename.replace(extension, f'_chapter_{i}_{voice}_{xhtml_file_name}.wav')
+        chapter_wav_path = Path(output_folder) / Path(filename).with_suffix('').name
+        chapter_wav_path = chapter_wav_path.with_name(f"{chapter_wav_path.name}_chapter_{i}_{voice}_{xhtml_file_name}.wav")
         chapter_wav_files.append(chapter_wav_path)
         if Path(chapter_wav_path).exists():
             print(f'File for chapter {i} already exists. Skipping')
@@ -430,11 +454,12 @@ def strfdelta(tdelta, fmt='{D:02}d {H:02}h {M:02}m {S:02}s'):
 
 
 def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
-    wav_list_txt = Path(output_folder) / filename.replace('.epub', '_wav_list.txt')
+    base = Path(filename).stem
+    wav_list_txt = Path(output_folder) / f"{base}_wav_list.txt"
     with open(wav_list_txt, 'w') as f:
         for wav_file in chapter_files:
             f.write(f"file '{wav_file}'\n")
-    concat_file_path = Path(output_folder) / filename.replace('.epub', '.tmp.mp4')
+    concat_file_path = Path(output_folder) / f"{base}.tmp.mp4"
     subprocess.run(['ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', wav_list_txt, '-c', 'copy', concat_file_path])
     Path(wav_list_txt).unlink()
     return concat_file_path
@@ -442,7 +467,7 @@ def concat_wavs_with_ffmpeg(chapter_files, output_folder, filename):
 
 def create_m4b(chapter_files, filename, cover_image, output_folder):
     concat_file_path = concat_wavs_with_ffmpeg(chapter_files, output_folder, filename)
-    final_filename = Path(output_folder) / filename.replace('.epub', '.m4b')
+    final_filename = Path(output_folder) / f"{Path(filename).stem}.m4b"
     chapters_txt_path = Path(output_folder) / "chapters.txt"
     print('Creating M4B file...')
 

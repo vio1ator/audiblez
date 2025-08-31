@@ -446,6 +446,55 @@ class MainWindow(wx.Frame):
         self.splitter_right.Layout()
         self.splitter.Layout()
 
+    def open_pdf(self, file_path):
+        # Cleanup previous layout
+        if hasattr(self, 'selected_book'):
+            self.splitter.DestroyChildren()
+
+        self.selected_file_path = file_path
+        print(f"Opening PDF: {file_path}")
+
+        from audiblez.pdf import extract_pages
+        pages = extract_pages(file_path, {
+            'header': 0.07,
+            'footer': 0.07,
+            'left': 0.07,
+            'right': 0.07,
+        })
+
+        # Minimal book metadata for PDF
+        self.selected_book_title = Path(file_path).stem
+        self.selected_book_author = ''
+        self.selected_book = None
+
+        # Prepare chapter-like structure for UI
+        self.document_chapters = pages
+        for ch in self.document_chapters:
+            ch.short_name = ch.get_name()
+            ch.is_selected = True
+
+        # Default selection: first page
+        self.selected_chapter = self.document_chapters[0] if self.document_chapters else None
+
+        self.create_layout_for_ebook(self.splitter)
+
+        # No cover for PDFs
+        self.cover_bitmap.SetBitmap(wx.NullBitmap)
+
+        chapters_panel = self.create_chapters_table_panel(self.document_chapters)
+
+        if self.chapters_panel:
+            self.left_sizer.Replace(self.chapters_panel, chapters_panel)
+            self.chapters_panel.Destroy()
+            self.chapters_panel = chapters_panel
+        else:
+            self.left_sizer.Add(chapters_panel, 1, wx.ALL | wx.EXPAND, 5)
+            self.chapters_panel = chapters_panel
+
+        self.splitter_left.Layout()
+        self.splitter_right.Layout()
+        self.splitter.Layout()
+
     def on_table_checked(self, event):
         self.document_chapters[event.GetIndex()].is_selected = True
 
@@ -553,7 +602,7 @@ class MainWindow(wx.Frame):
         self.core_thread.start()
 
     def on_open(self, event):
-        with wx.FileDialog(self, "Open EPUB File", wildcard="*.epub", style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dialog:
+        with wx.FileDialog(self, "Open EPUB/PDF File", wildcard="*.epub;*.pdf", style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dialog:
             if dialog.ShowModal() == wx.ID_CANCEL:
                 return
             file_path = dialog.GetPath()
@@ -564,7 +613,10 @@ class MainWindow(wx.Frame):
             if self.synthesis_in_progress:
                 wx.MessageBox("Audiobook synthesis is still in progress. Please wait for it to finish.", "Audiobook Synthesis in Progress")
             else:
-                wx.CallAfter(self.open_epub, file_path)
+                if file_path.lower().endswith('.pdf'):
+                    wx.CallAfter(self.open_pdf, file_path)
+                else:
+                    wx.CallAfter(self.open_epub, file_path)
 
     def on_exit(self, event):
         self.Close()

@@ -49,10 +49,8 @@ def _file_browser(start_dir: Path, patterns: List[str]) -> Optional[Path]:
     while True:
         title = f"Select file (current: {cur})"
         options = _list_dir_for_picker(cur, patterns)
-        try:
-            choice, _ = pick(options, title, multiselect=False, min_selection_count=1)
-        except Exception as e:
-            print("Selection failed:", e)
+        choice, _ = select_with_letter_jump(options, title, jump_to_folders=True)
+        if choice is None:
             return None
         if choice == "..":
             parent = cur.parent
@@ -74,10 +72,8 @@ def _dir_browser(start_dir: Path) -> Optional[Path]:
     while True:
         title = f"Select output folder (current: {cur})"
         options = ["[Use this directory]"] + _list_dir_for_picker(cur, patterns=["*"])
-        try:
-            choice, _ = pick(options, title, multiselect=False, min_selection_count=1)
-        except Exception as e:
-            print("Selection failed:", e)
+        choice, _ = select_with_letter_jump(options, title, jump_to_folders=True)
+        if choice is None:
             return None
         if choice == "[Use this directory]":
             return cur
@@ -275,6 +271,107 @@ def main():
         do_prev, _ = pick(["Yes", "No"], "Preview chapters/pages before starting?", multiselect=False, min_selection_count=1)
     except Exception:
         do_prev = "No"
+
+
+def select_with_letter_jump(options: List[str], title: str, jump_to_folders: bool = True, start_index: int = 0):
+    """Curses-based selector with first-letter jump to folder.
+
+    Returns (choice, index) or (None, None) on cancel/failure.
+    """
+    try:
+        import curses
+    except Exception as e:
+        # Fallback to pick if curses unavailable
+        try:
+            return pick(options, title, multiselect=False, min_selection_count=1)
+        except Exception as e2:
+            print("Selection failed:", e2)
+            return None, None
+
+    def _run(stdscr):
+        curses.curs_set(0)
+        stdscr.keypad(True)
+        idx = min(max(0, start_index), max(0, len(options) - 1))
+        top = 0
+        while True:
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            vis_h = max(1, h - 3)
+            # Adjust scrolling window
+            if idx < top:
+                top = idx
+            elif idx >= top + vis_h:
+                top = idx - vis_h + 1
+
+            # Render
+            title_str = (title or "")[: max(0, w - 1)]
+            try:
+                stdscr.addstr(0, 0, title_str, curses.A_BOLD)
+            except curses.error:
+                pass
+            hint = "Arrows/jk move • letters jump to folder • Enter select • q quit"
+            try:
+                stdscr.addstr(1, 0, hint[: max(0, w - 1)])
+            except curses.error:
+                pass
+            for row in range(vis_h):
+                j = top + row
+                if j >= len(options):
+                    break
+                line = options[j]
+                mark = ">" if j == idx else " "
+                text = f"{mark} {line}"
+                try:
+                    stdscr.addstr(2 + row, 0, text[: max(0, w - 1)], curses.A_REVERSE if j == idx else curses.A_NORMAL)
+                except curses.error:
+                    pass
+            stdscr.refresh()
+
+            key = stdscr.getch()
+            if key in (curses.KEY_UP, ord('k')):
+                idx = max(0, idx - 1)
+            elif key in (curses.KEY_DOWN, ord('j')):
+                idx = min(len(options) - 1, idx + 1)
+            elif key == curses.KEY_PPAGE:
+                idx = max(0, idx - vis_h)
+            elif key == curses.KEY_NPAGE:
+                idx = min(len(options) - 1, idx + vis_h)
+            elif key in (10, 13, curses.KEY_ENTER):
+                return idx
+            elif key in (27, ord('q')):
+                return None
+            elif 32 <= key <= 126:  # printable ASCII
+                ch = chr(key)
+                # Prefer folders ending with '/'
+                def starts_with(s: str, c: str) -> bool:
+                    return s.lower().startswith(c.lower())
+
+                match_idx = None
+                if jump_to_folders:
+                    for k, s in enumerate(options):
+                        if s.endswith('/') and starts_with(s, ch):
+                            match_idx = k
+                            break
+                if match_idx is None:
+                    for k, s in enumerate(options):
+                        if starts_with(s, ch):
+                            match_idx = k
+                            break
+                if match_idx is not None:
+                    idx = match_idx
+            # loop continues
+
+    try:
+        res = __import__('curses').wrapper(_run)
+    except Exception:
+        try:
+            return pick(options, title, multiselect=False, min_selection_count=1)
+        except Exception as e:
+            print("Selection failed:", e)
+            return None, None
+    if res is None:
+        return None, None
+    return options[res], res
     if do_prev == "Yes":
         _preview_loop(selected, voice, speed, backend, mlx_model)
 

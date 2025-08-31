@@ -5,7 +5,7 @@
 Features:
 - Browse for EPUB/PDF via a simple picker-based file browser.
 - Choose output folder.
-- Select voice, backend, speed, and device (CPU/CUDA/MPS).
+- Select voice, backend, and speed. Device is auto-selected (CUDA/MPS/CPU).
 - For PDF, set header/footer/left/right margins (0–0.3).
 - Select chapters/pages with multiselect and optional audio preview.
 - Run synthesis with progress updates.
@@ -115,25 +115,26 @@ def _choose_backend() -> Tuple[str, Optional[str]]:
 
 
 def _choose_device():
+    """Auto-select compute device without prompting the user.
+
+    Preference order: CUDA > MPS > CPU.
+    Silently no-ops if torch is unavailable.
+    """
     try:
         import torch
     except Exception:
-        print("Torch not available; using CPU.")
         return
-    options = ["CPU", "CUDA", "MPS"]
-    dev, _ = pick(options, "Select compute device", multiselect=False, min_selection_count=1)
-    chosen = None
-    if dev == "CUDA" and torch.cuda.is_available():
-        chosen = 'cuda'
-    elif dev == "MPS" and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        chosen = 'mps'
-    else:
-        chosen = 'cpu'
+    chosen = 'cpu'
     try:
+        if torch.cuda.is_available():
+            chosen = 'cuda'
+        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            chosen = 'mps'
         torch.set_default_device(chosen)
         print(f"Using device: {chosen}")
     except Exception:
-        print(f"Failed to set device {chosen}; continuing.")
+        # If anything goes wrong, just continue on default device.
+        pass
 
 
 def _input_float(prompt: str, default: float, lo: float, hi: float) -> float:

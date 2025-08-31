@@ -344,6 +344,9 @@ def _preview_loop(chapters, voice: str, speed: float, backend: str, mlx_model: s
         except Exception as e:
             print("Preview selection failed:", e)
             return
+        if choice is None:
+            # User canceled (q/Esc). Exit preview loop gracefully.
+            return
         if choice == "[Done]":
             return
         chapter = chapters[idx]

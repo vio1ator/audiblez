@@ -50,9 +50,9 @@ def _file_browser(start_dir: Path, patterns: List[str]) -> Optional[Path]:
         title = f"Select file (current: {cur})"
         options = _list_dir_for_picker(cur, patterns)
         try:
-            (choice, _), = pick(options, title, multiselect=False, min_selection_count=1)
-        except Exception:
-            print("Picker failed to render. Try enlarging terminal or different terminal app.")
+            choice, _ = pick(options, title, multiselect=False, min_selection_count=1)
+        except Exception as e:
+            print("Selection failed:", e)
             return None
         if choice == "..":
             parent = cur.parent
@@ -75,9 +75,9 @@ def _dir_browser(start_dir: Path) -> Optional[Path]:
         title = f"Select output folder (current: {cur})"
         options = ["[Use this directory]"] + _list_dir_for_picker(cur, patterns=["*"])
         try:
-            (choice, _), = pick(options, title, multiselect=False, min_selection_count=1)
-        except Exception:
-            print("Picker failed to render. Try enlarging terminal or different terminal app.")
+            choice, _ = pick(options, title, multiselect=False, min_selection_count=1)
+        except Exception as e:
+            print("Selection failed:", e)
             return None
         if choice == "[Use this directory]":
             return cur
@@ -99,14 +99,14 @@ def _choose_voice() -> str:
         for v in vlist:
             items.append(f"{FLAGS.get(code, '')} {v}")
     title = "Select voice"
-    (choice, _), = pick(items, title, multiselect=False, min_selection_count=1)
+    choice, _ = pick(items, title, multiselect=False, min_selection_count=1)
     return choice.split(" ", 1)[1]
 
 
 def _choose_backend() -> Tuple[str, Optional[str]]:
     default_model = 'mlx-community/Kokoro-82M-8bit'
     options = ["auto", "mlx", "kokoro"]
-    (backend, _), = pick(options, "Select TTS backend", multiselect=False, min_selection_count=1)
+    backend, _ = pick(options, "Select TTS backend", multiselect=False, min_selection_count=1)
     mlx_model = default_model
     if backend == "mlx":
         # Offer model override via simple text prompt
@@ -124,7 +124,7 @@ def _choose_device():
         print("Torch not available; using CPU.")
         return
     options = ["CPU", "CUDA", "MPS"]
-    (dev, _), = pick(options, "Select compute device", multiselect=False, min_selection_count=1)
+    dev, _ = pick(options, "Select compute device", multiselect=False, min_selection_count=1)
     chosen = None
     if dev == "CUDA" and torch.cuda.is_available():
         chosen = 'cuda'
@@ -200,9 +200,9 @@ def _preview_loop(chapters, voice: str, speed: float, backend: str, mlx_model: s
         opts = [f"{i+1}. {getattr(c, 'get_name', lambda: f'Chapter {i+1}')()}" for i, c in enumerate(chapters)]
         opts.append("[Done]")
         try:
-            (choice, idx), = pick(opts, "Select a chapter/page to preview", multiselect=False, min_selection_count=1)
-        except Exception:
-            print("Picker failed to render for preview. Skipping previews.")
+            choice, idx = pick(opts, "Select a chapter/page to preview", multiselect=False, min_selection_count=1)
+        except Exception as e:
+            print("Preview selection failed:", e)
             return
         if choice == "[Done]":
             return
@@ -272,7 +272,7 @@ def main():
 
     # Offer previews
     try:
-        (do_prev, _), = pick(["Yes", "No"], "Preview chapters/pages before starting?", multiselect=False, min_selection_count=1)
+        do_prev, _ = pick(["Yes", "No"], "Preview chapters/pages before starting?", multiselect=False, min_selection_count=1)
     except Exception:
         do_prev = "No"
     if do_prev == "Yes":
@@ -291,4 +291,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

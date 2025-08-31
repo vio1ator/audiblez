@@ -35,6 +35,7 @@ Issues = "https://github.com/santinic/audiblez/issues"
 [project.scripts]
 audiblez = "audiblez.cli:cli_main"
 audiblez-ui = "audiblez.ui:main"
+audiblez-tui = "audiblez.tui:main"
 
 [tool.poetry.group.dev.dependencies]
 deptry = "^0.23.0"

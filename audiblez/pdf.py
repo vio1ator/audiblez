@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Dict
 
 import fitz  # PyMuPDF
+import re
 
 
 @dataclass
@@ -29,14 +30,35 @@ class PageChapter:
 
 
 def _clean_text(text: str) -> str:
-    # Basic cleanup: normalize whitespace, strip, and ensure newline termination
+    """Normalize PDF-extracted text into readable sentences.
+
+    - Remove hard line breaks inside paragraphs
+    - Fix hyphenation at line endings (e.g., "Austro-\nPrussian" -> "Austro-Prussian")
+    - Preserve paragraph breaks (double newlines)
+    """
     if not text:
         return ""
-    t = text.replace('\r', '\n')
-    # Collapse multiple newlines and spaces
-    lines = [ln.strip() for ln in t.split('\n')]
-    t = '\n'.join([ln for ln in lines if ln])
-    # Avoid empty trailing whitespace
+    # Normalize newlines
+    t = text.replace("\r", "\n")
+    # Collapse trailing spaces per line
+    t = "\n".join(ln.strip() for ln in t.split("\n"))
+    # Normalize multiple blank lines to exactly two (paragraph break)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    # Remove hyphenation across line breaks: word-\nWord -> wordWord
+    t = re.sub(r"(\w)-\n(\w)", r"\1\2", t)
+    # Join single line breaks that are likely mid-sentence into spaces.
+    # If a newline is not followed by another newline (i.e., not a paragraph)
+    # and the preceding character isn't sentence-ending punctuation, replace with space.
+    # Consider ., !, ?, :, ;, em/en dash as potential soft boundaries to keep.
+    t = re.sub(
+        r"([^\n])(\n)([^\n])",
+        lambda m: m.group(1) + ("\n" if m.group(1) in ".!?" else " ") + m.group(3),
+        t,
+    )
+    # Collapse residual spaces
+    t = re.sub(r"[ \t]+", " ", t)
+    # Ensure paragraphs separated by exactly one blank line
+    t = re.sub(r"\n\s*\n", "\n\n", t)
     return t.strip()
 
 
@@ -85,5 +107,54 @@ def extract_pages(file_path: str | Path, margins: Dict[str, float]) -> List[Page
             page_text = _clean_text("\n".join(pieces))
             ch = PageChapter(page_num=i, extracted_text=page_text, chapter_index=i - 1)
             chapters.append(ch)
+    # Stitch sentence fragments across page boundaries
+    _stitch_boundary_sentences(chapters)
     return chapters
 
+
+def _stitch_boundary_sentences(chapters: List[PageChapter]) -> None:
+    """Move trailing mid‑sentence fragments from page N to the start of N+1.
+
+    Heuristics:
+    - If a page doesn't end with sentence punctuation, take the trailing
+      fragment after the last punctuation and prepend it to the next page.
+    - Skip if the fragment looks like a standalone heading (very short or
+      mostly uppercase), to avoid polluting body text.
+    """
+    def last_sentence_punct_idx(s: str) -> int | None:
+        last = None
+        for m in re.finditer(r'[\.\!\?…]["”\)\]]*', s or ''):
+            last = m
+        return last.end() if last else None
+
+    def is_heading(fragment: str) -> bool:
+        f = (fragment or '').strip()
+        if not f:
+            return True
+        # Short fragments are often headings or section labels
+        if len(f) <= 25:
+            return True
+        # Mostly uppercase (excluding punctuation/spaces) -> heading
+        letters = [c for c in f if c.isalpha()]
+        if letters and sum(1 for c in letters if c.isupper()) / len(letters) > 0.7:
+            return True
+        return False
+
+    for i in range(len(chapters) - 1):
+        a = chapters[i].extracted_text or ''
+        b = chapters[i + 1].extracted_text or ''
+        idx = last_sentence_punct_idx(a)
+        if idx is None:
+            # Whole page is a fragment; if it's not heading, move it forward
+            frag = a.strip()
+            if frag and not is_heading(frag):
+                chapters[i].extracted_text = ''
+                joiner = '' if frag.endswith('-') else ' '
+                chapters[i + 1].extracted_text = (frag + joiner + b.lstrip()).strip()
+            continue
+        trailing = a[idx:].strip()
+        if trailing and not is_heading(trailing):
+            kept = a[:idx].rstrip()
+            joiner = '' if kept.endswith('-') else ' '
+            chapters[i].extracted_text = kept
+            chapters[i + 1].extracted_text = (trailing + joiner + b.lstrip()).strip()

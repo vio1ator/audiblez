@@ -101,7 +101,7 @@ def _choose_voice() -> str:
 
 
 def _choose_backend() -> Tuple[str, Optional[str]]:
-    default_model = 'mlx-community/Kokoro-82M-8bit'
+    default_model = 'mlx-community/Kokoro-82M-bf16'
     options = ["auto", "mlx", "kokoro"]
     backend, _ = pick(options, "Select TTS backend", multiselect=False, min_selection_count=1)
     mlx_model = default_model

@@ -40,10 +40,6 @@ def cli_main():
                         help='Ideal tokens to target per chunk (Goldilocks target)')
     parser.add_argument('--max-tokens', type=int, default=200,
                         help='Maximum tokens allowed per chunk (Goldilocks upper bound)')
-    parser.add_argument('--short-merge-max', type=int, default=5,
-                        help='Merge sentences with <= this many tokens into neighbors')
-    parser.add_argument('--long-guard-min', type=int, default=30,
-                        help='Treat neighbors with >= this many tokens as too long to merge into')
     # PDF extraction margins
     def _margin(v: str):
         try:
@@ -107,8 +103,6 @@ def cli_main():
         gold_min=args.min_tokens,
         gold_ideal=args.ideal_tokens,
         gold_max=args.max_tokens,
-        short_merge_max=args.short_merge_max,
-        long_guard_min=args.long_guard_min,
     )
 
 

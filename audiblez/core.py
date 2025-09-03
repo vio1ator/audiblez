@@ -399,14 +399,14 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
         nonlocal cur_chunk, cur_len, emitted_sentences
         if not cur_chunk:
             return
-        # Join sentences with explicit split markers so Kokoro returns
-        # sentence-aligned segments in a single call.
-        buffer_text = '\n\n\n'.join(cur_chunk)
+        # Format chunk as a paragraph to encourage natural prosody
+        buffer_text = ' '.join(cur_chunk)
         # Save the exact formatted text sent to TTS, if requested
         _maybe_write_debug(buffer_text)
         start_time = time.time()
         try:
-            for gs, ps, audio in pipeline(buffer_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
+            # Use a non-matching split pattern to avoid internal splitting
+            for gs, ps, audio in pipeline(buffer_text, voice=voice, speed=speed, split_pattern=r'(?!)'):
                 audio_segments.append(audio)
         except Exception as e:
             # Only auto-fallback when backend was auto-selected (not explicitly 'mlx')
@@ -418,7 +418,7 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
                     pass
                 try:
                     fb = create_pipeline('kokoro', voice, mlx_model)
-                    for gs, ps, audio in fb(buffer_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
+                    for gs, ps, audio in fb(buffer_text, voice=voice, speed=speed, split_pattern=r'(?!)'):
                         audio_segments.append(audio)
                     # Replace pipeline for subsequent chunks
                     nonlocal_pipeline[0] = fb

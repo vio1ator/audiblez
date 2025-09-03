@@ -28,6 +28,11 @@ def cli_main():
     parser.add_argument('--backend', choices=['auto', 'mlx', 'kokoro'], default='auto', help='TTS backend: mlx (MLX-Audio), kokoro (original), or auto')
     parser.add_argument('--mlx-model', default='mlx-community/Kokoro-82M-8bit', help='MLX model id or path (default: 8-bit Kokoro)')
     parser.add_argument('--mlx-exec', default=None, help='Path to MLX-Audio executable (mlx-audio). Overrides PATH lookup')
+    # Debug: save formatted text sent to TTS
+    parser.add_argument('--debug-text', default=False, action='store_true',
+                        help='Save the formatted text sent to TTS into a file in the output folder')
+    parser.add_argument('--debug-text-file', default=None,
+                        help='Explicit file path to save the formatted text (overrides --debug-text default path)')
     # PDF extraction margins
     def _margin(v: str):
         try:
@@ -86,6 +91,8 @@ def cli_main():
         footer=args.footer,
         left=args.left,
         right=args.right,
+        debug_text=args.debug_text,
+        debug_text_file=args.debug_text_file,
     )
 
 

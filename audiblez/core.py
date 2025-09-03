@@ -19,6 +19,7 @@ import platform
 import re
 from io import StringIO
 from types import SimpleNamespace
+from typing import Optional
 from tabulate import tabulate
 from pathlib import Path
 from string import Formatter
@@ -87,13 +88,27 @@ def set_espeak_library():
 def main(file_path, voice, pick_manually, speed, output_folder='.',
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
          backend='mlx', mlx_model='mlx-community/Kokoro-82M-8bit',
-         header: float = 0.07, footer: float = 0.07, left: float = 0.07, right: float = 0.07):
+         header: float = 0.07, footer: float = 0.07, left: float = 0.07, right: float = 0.07,
+         debug_text: bool = False, debug_text_file: Optional[str] = None):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
     if output_folder != '.':
         Path(output_folder).mkdir(parents=True, exist_ok=True)
 
     filename = Path(file_path).name
+    # Resolve debug text path (single file, appended across chapters)
+    debug_path: Optional[Path] = None
+    if debug_text or debug_text_file:
+        debug_path = Path(debug_text_file) if debug_text_file else Path(output_folder) / f"{Path(filename).stem}_tts_formatted.txt"
+        try:
+            # Truncate existing file for a fresh run
+            debug_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(debug_path, 'w', encoding='utf-8') as f:
+                f.write(f"# Formatted TTS text for {filename}\n\n")
+        except Exception:
+            traceback.print_exc()
+            print(f"Warning: could not open debug text file: {debug_path}")
+            debug_path = None
 
     # Branch by file type (EPUB vs PDF)
     extension = Path(file_path).suffix.lower()
@@ -193,7 +208,9 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
         if post_event: post_event('CORE_CHAPTER_STARTED', chapter_index=chapter.chapter_index)
         audio_segments = gen_audio_segments(
             pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
-            backend=backend, mlx_model=mlx_model)
+            backend=backend, mlx_model=mlx_model,
+            debug_text_file=str(debug_path) if debug_path else None,
+            debug_header=f"=== Chapter {i}: {chapter.get_name()} ===")
         if audio_segments:
             final_audio = np.concatenate(audio_segments)
             soundfile.write(chapter_wav_path, final_audio, sample_rate)
@@ -245,7 +262,8 @@ def print_selected_chapters(document_chapters, chapters):
 
 
 def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None, chunk_chars=1500,
-                       backend='kokoro', mlx_model='mlx-community/Kokoro-82M-4bit'):
+                       backend='kokoro', mlx_model='mlx-community/Kokoro-82M-4bit',
+                       debug_text_file: Optional[str] = None, debug_header: Optional[str] = None):
     """Generate audio for the given text using Kokoro.
 
     Improvements for Apple Silicon performance:
@@ -259,10 +277,123 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     doc = nlp(text)
     sentences = list(doc.sents)
 
-    # Prepare chunks of sentences up to `chunk_chars` characters.
+    # Goldilocks targets (approximate tokens ~= words)
+    GOLD_MIN = 100
+    GOLD_IDEAL = 150
+    GOLD_MAX = 200
+    RUSH_WARN = 400
+
+    # Token helpers
+    def _tokenize_visible(text_: str):
+        return re.findall(r"\w+|[^\w\s]", text_)
+
+    def _token_count(text_: str) -> int:
+        return len(_tokenize_visible(text_))
+
+    # Convert spaCy spans to strings once
+    sent_texts = [s.text.strip() for s in sentences]
+
+    # 1) Merge very short sentences with neighbors (≤5 tokens)
+    SHORT_MAX = 5
+    LONG_MIN = 30  # consider >= LONG_MIN tokens as super long
+
+    def _word_like_count(s: str) -> int:
+        return len(re.findall(r"[\w']+", s))
+
+    merged_units = []
+    i = 0
+    while i < len(sent_texts):
+        cur = sent_texts[i]
+        cur_w = _word_like_count(cur)
+        if cur_w <= SHORT_MAX:
+            if merged_units and _word_like_count(merged_units[-1]) < LONG_MIN:
+                merged_units[-1] = f"{merged_units[-1]} {cur}".strip()
+                i += 1
+                continue
+            if i + 1 < len(sent_texts) and _word_like_count(sent_texts[i + 1]) < LONG_MIN:
+                merged_units.append(f"{cur} {sent_texts[i + 1]}".strip())
+                i += 2
+                continue
+        merged_units.append(cur)
+        i += 1
+
+    # 2) Split overly long sentences at natural punctuation; fallback to hard token splits
+    PUNCT_SPLIT_RE = re.compile(r'(,|;|:|\u2014|\u2013)')  # comma, semicolon, colon, em/en dash
+
+    def _split_long(text_):
+        if _token_count(text_) <= GOLD_MAX:
+            return [text_]
+        parts = PUNCT_SPLIT_RE.split(text_)
+        # Recombine clause + delimiter
+        clauses = []
+        for j in range(0, len(parts), 2):
+            chunk = parts[j]
+            delim = parts[j + 1] if j + 1 < len(parts) else ''
+            clause = (chunk + delim).strip()
+            if clause:
+                clauses.append(clause)
+        out = []
+        cur = []
+        cur_toks = 0
+        for cl in clauses:
+            cl_toks = _token_count(cl)
+            if cur and (cur_toks + cl_toks > GOLD_MAX):
+                out.append(' '.join(cur).strip())
+                cur = [cl]
+                cur_toks = cl_toks
+            else:
+                cur.append(cl)
+                cur_toks += cl_toks
+                if cur_toks >= GOLD_IDEAL:
+                    out.append(' '.join(cur).strip())
+                    cur = []
+                    cur_toks = 0
+        if cur:
+            out.append(' '.join(cur).strip())
+
+        # Fallback: hard split any segment still above GOLD_MAX
+        final_out = []
+        for seg in out:
+            toks = _tokenize_visible(seg)
+            if len(toks) <= GOLD_MAX:
+                final_out.append(seg)
+                continue
+            start = 0
+            while start < len(toks):
+                end = min(start + GOLD_MAX, len(toks))
+                sub = ' '.join([t for t in toks[start:end]])
+                final_out.append(sub)
+                start = end
+        return final_out
+
+    processed_units = []
+    for u in merged_units:
+        processed_units.extend(_split_long(u))
+
+    # Prepare chunks targeting Goldilocks token range
     cur_chunk = []
     cur_len = 0
+    cur_tokens = 0
     emitted_sentences = 0
+
+    wrote_header = False
+    chunk_idx = 0
+
+    def _maybe_write_debug(buf: str):
+        nonlocal wrote_header, chunk_idx
+        if not debug_text_file:
+            return
+        try:
+            with open(debug_text_file, 'a', encoding='utf-8') as f:
+                if debug_header and not wrote_header:
+                    f.write(f"{debug_header}\n")
+                    wrote_header = True
+                f.write(f"\n--- chunk {chunk_idx} ({len(buf)} chars, {_token_count(buf)} tokens) ---\n")
+                f.write(buf)
+                f.write("\n")
+            chunk_idx += 1
+        except Exception:
+            traceback.print_exc()
 
     def flush_chunk():
         nonlocal cur_chunk, cur_len, emitted_sentences
@@ -271,6 +402,8 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
         # Join sentences with explicit split markers so Kokoro returns
         # sentence-aligned segments in a single call.
         buffer_text = '\n\n\n'.join(cur_chunk)
+        # Save the exact formatted text sent to TTS, if requested
+        _maybe_write_debug(buffer_text)
         start_time = time.time()
         try:
             for gs, ps, audio in pipeline(buffer_text, voice=voice, speed=speed, split_pattern=r'\n\n\n'):
@@ -319,16 +452,18 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     # A small indirection to allow replacing the pipeline on fallback.
     nonlocal_pipeline = [pipeline]
 
-    for i, sent in enumerate(sentences):
+    for i, sent in enumerate(processed_units):
         if max_sentences and emitted_sentences >= max_sentences:
             break
-        s = sent.text
-        # If a single sentence is itself longer than chunk_chars, flush current
-        # chunk and emit it alone to avoid starvation.
-        if cur_chunk and (cur_len + len(s) > chunk_chars):
+        s = sent
+        s_tokens = len(re.findall(r"\w+|[^\w\s]", s))
+        # If adding this would exceed GOLD_MAX, flush current first
+        if cur_chunk and (cur_tokens + s_tokens > GOLD_MAX):
             flush_chunk()
+            cur_tokens = 0
         cur_chunk.append(s)
         cur_len += len(s)
+        cur_tokens += s_tokens
         emitted_sentences += 1
 
     # Flush any remaining text

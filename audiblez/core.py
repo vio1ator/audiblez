@@ -90,7 +90,7 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
          backend='mlx', mlx_model='mlx-community/Kokoro-82M-8bit',
          header: float = 0.07, footer: float = 0.07, left: float = 0.07, right: float = 0.07,
          debug_text: bool = False, debug_text_file: Optional[str] = None,
-         gold_min: int = 100, gold_ideal: int = 150, gold_max: int = 200):
+         gold_min: int = 50, gold_ideal: int = 100, gold_max: int = 150):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
     if output_folder != '.':
@@ -266,7 +266,7 @@ def print_selected_chapters(document_chapters, chapters):
 def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None, chunk_chars=1500,
                        backend='kokoro', mlx_model='mlx-community/Kokoro-82M-4bit',
                        debug_text_file: Optional[str] = None, debug_header: Optional[str] = None,
-                       gold_min: int = 100, gold_ideal: int = 150, gold_max: int = 200):
+                       gold_min: int = 50, gold_ideal: int = 100, gold_max: int = 150):
     """Generate audio for the given text using Kokoro.
 
     Improvements for Apple Silicon performance:

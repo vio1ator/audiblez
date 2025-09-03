@@ -151,6 +151,20 @@ def _input_float(prompt: str, default: float, lo: float, hi: float) -> float:
         print(f"Enter a number in range [{lo}, {hi}].")
 
 
+def _input_int(prompt: str, default: int, lo: int, hi: int) -> int:
+    while True:
+        s = input(f"{prompt} [{default}]: ").strip()
+        if not s:
+            return default
+        try:
+            v = int(s)
+            if lo <= v <= hi:
+                return v
+        except Exception:
+            pass
+        print(f"Enter an integer in range [{lo}, {hi}].")
+
+
 def _select_chapters_for_epub(book) -> List:
     from .core import find_document_chapters_and_extract_texts, find_good_chapters, chapter_beginning_one_liner
     chapters = find_document_chapters_and_extract_texts(book)
@@ -396,6 +410,12 @@ def main():
     backend, mlx_model = _choose_backend()
     _choose_device()
 
+    # Chunking thresholds (tokens ~= words)
+    print("\nSet chunking thresholds (tokens ~= words). Press Enter to accept defaults.")
+    min_tokens = _input_int("Min tokens", 50, 10, 500)
+    ideal_tokens = _input_int("Ideal tokens", 100, 10, 500)
+    max_tokens = _input_int("Max tokens", 150, 10, 500)
+
     is_pdf = ebook.suffix.lower() == '.pdf'
     margins = dict(header=0.07, footer=0.07, left=0.07, right=0.07)
     if is_pdf:
@@ -429,6 +449,7 @@ def main():
         backend=backend, mlx_model=mlx_model,
         header=margins.get('header', 0.07), footer=margins.get('footer', 0.07),
         left=margins.get('left', 0.07), right=margins.get('right', 0.07),
+        gold_min=min_tokens, gold_ideal=ideal_tokens, gold_max=max_tokens,
         post_event=_post_event,
     )
 

@@ -34,11 +34,11 @@ def cli_main():
     parser.add_argument('--debug-text-file', default=None,
                         help='Explicit file path to save the formatted text (overrides --debug-text default path)')
     # Chunking thresholds (tokens ~= words)
-    parser.add_argument('--min-tokens', type=int, default=100,
+    parser.add_argument('--min-tokens', type=int, default=50,
                         help='Minimum tokens to target per chunk (Goldilocks lower bound)')
-    parser.add_argument('--ideal-tokens', type=int, default=150,
+    parser.add_argument('--ideal-tokens', type=int, default=100,
                         help='Ideal tokens to target per chunk (Goldilocks target)')
-    parser.add_argument('--max-tokens', type=int, default=200,
+    parser.add_argument('--max-tokens', type=int, default=150,
                         help='Maximum tokens allowed per chunk (Goldilocks upper bound)')
     # PDF extraction margins
     def _margin(v: str):

@@ -328,6 +328,20 @@ class MainWindow(wx.Frame):
         sizer.Add(speed_label, pos=(2, 0), flag=wx.ALL, border=border)
         sizer.Add(speed_text_input, pos=(2, 1), flag=wx.ALL, border=border)
 
+        # Chunking thresholds (tokens ~= words)
+        min_tokens_label = wx.StaticText(panel, label="Min tokens:")
+        self.min_tokens_ctrl = wx.SpinCtrl(panel, min=10, max=500, initial=50)
+        ideal_tokens_label = wx.StaticText(panel, label="Ideal tokens:")
+        self.ideal_tokens_ctrl = wx.SpinCtrl(panel, min=10, max=500, initial=100)
+        max_tokens_label = wx.StaticText(panel, label="Max tokens:")
+        self.max_tokens_ctrl = wx.SpinCtrl(panel, min=10, max=500, initial=150)
+        sizer.Add(min_tokens_label, pos=(3, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.min_tokens_ctrl, pos=(3, 1), flag=wx.ALL, border=border)
+        sizer.Add(ideal_tokens_label, pos=(4, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.ideal_tokens_ctrl, pos=(4, 1), flag=wx.ALL, border=border)
+        sizer.Add(max_tokens_label, pos=(5, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.max_tokens_ctrl, pos=(5, 1), flag=wx.ALL, border=border)
+
         # Add file dialog selector to select output folder
         output_folder_label = wx.StaticText(panel, label="Output Folder:")
         self.output_folder_text_ctrl = wx.TextCtrl(panel, value=os.path.abspath('.'))
@@ -335,9 +349,9 @@ class MainWindow(wx.Frame):
         # self.output_folder_text_ctrl.SetMinSize((200, -1))
         output_folder_button = wx.Button(panel, label="📂 Select")
         output_folder_button.Bind(wx.EVT_BUTTON, self.open_output_folder_dialog)
-        sizer.Add(output_folder_label, pos=(3, 0), flag=wx.ALL, border=border)
-        sizer.Add(self.output_folder_text_ctrl, pos=(3, 1), flag=wx.ALL | wx.EXPAND, border=border)
-        sizer.Add(output_folder_button, pos=(4, 1), flag=wx.ALL, border=border)
+        sizer.Add(output_folder_label, pos=(6, 0), flag=wx.ALL, border=border)
+        sizer.Add(self.output_folder_text_ctrl, pos=(6, 1), flag=wx.ALL | wx.EXPAND, border=border)
+        sizer.Add(output_folder_button, pos=(7, 1), flag=wx.ALL, border=border)
 
     def create_synthesis_panel(self):
         # Think and identify layout issue with the folling code
@@ -666,7 +680,11 @@ class MainWindow(wx.Frame):
         self.core_thread = CoreThread(params=dict(
             file_path=file_path, voice=voice, pick_manually=False, speed=speed,
             output_folder=self.output_folder_text_ctrl.GetValue(),
-            selected_chapters=selected_chapters))
+            selected_chapters=selected_chapters,
+            gold_min=int(self.min_tokens_ctrl.GetValue()),
+            gold_ideal=int(self.ideal_tokens_ctrl.GetValue()),
+            gold_max=int(self.max_tokens_ctrl.GetValue()),
+        ))
         self.core_thread.start()
 
     def on_open(self, event):

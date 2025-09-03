@@ -89,7 +89,9 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
          backend='mlx', mlx_model='mlx-community/Kokoro-82M-8bit',
          header: float = 0.07, footer: float = 0.07, left: float = 0.07, right: float = 0.07,
-         debug_text: bool = False, debug_text_file: Optional[str] = None):
+         debug_text: bool = False, debug_text_file: Optional[str] = None,
+         gold_min: int = 100, gold_ideal: int = 150, gold_max: int = 200,
+         short_merge_max: int = 5, long_guard_min: int = 30):
     if post_event: post_event('CORE_STARTED')
     load_spacy()
     if output_folder != '.':
@@ -210,7 +212,9 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
             pipeline, text, voice, speed, stats, post_event=post_event, max_sentences=max_sentences,
             backend=backend, mlx_model=mlx_model,
             debug_text_file=str(debug_path) if debug_path else None,
-            debug_header=f"=== Chapter {i}: {chapter.get_name()} ===")
+            debug_header=f"=== Chapter {i}: {chapter.get_name()} ===",
+            gold_min=gold_min, gold_ideal=gold_ideal, gold_max=gold_max,
+            short_merge_max=short_merge_max, long_guard_min=long_guard_min)
         if audio_segments:
             final_audio = np.concatenate(audio_segments)
             soundfile.write(chapter_wav_path, final_audio, sample_rate)
@@ -263,7 +267,9 @@ def print_selected_chapters(document_chapters, chapters):
 
 def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=None, post_event=None, chunk_chars=1500,
                        backend='kokoro', mlx_model='mlx-community/Kokoro-82M-4bit',
-                       debug_text_file: Optional[str] = None, debug_header: Optional[str] = None):
+                       debug_text_file: Optional[str] = None, debug_header: Optional[str] = None,
+                       gold_min: int = 100, gold_ideal: int = 150, gold_max: int = 200,
+                       short_merge_max: int = 5, long_guard_min: int = 30):
     """Generate audio for the given text using Kokoro.
 
     Improvements for Apple Silicon performance:
@@ -278,9 +284,9 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     sentences = list(doc.sents)
 
     # Goldilocks targets (approximate tokens ~= words)
-    GOLD_MIN = 100
-    GOLD_IDEAL = 150
-    GOLD_MAX = 200
+    GOLD_MIN = int(gold_min)
+    GOLD_IDEAL = int(gold_ideal)
+    GOLD_MAX = int(gold_max)
     RUSH_WARN = 400
 
     # Token helpers
@@ -294,8 +300,8 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
     sent_texts = [s.text.strip() for s in sentences]
 
     # 1) Merge very short sentences with neighbors (≤5 tokens)
-    SHORT_MAX = 5
-    LONG_MIN = 30  # consider >= LONG_MIN tokens as super long
+    SHORT_MAX = int(short_merge_max)
+    LONG_MIN = int(long_guard_min)  # consider >= LONG_MIN tokens as super long
 
     def _word_like_count(s: str) -> int:
         return len(re.findall(r"[\w']+", s))

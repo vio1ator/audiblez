@@ -33,6 +33,17 @@ def cli_main():
                         help='Save the formatted text sent to TTS into a file in the output folder')
     parser.add_argument('--debug-text-file', default=None,
                         help='Explicit file path to save the formatted text (overrides --debug-text default path)')
+    # Chunking thresholds (tokens ~= words)
+    parser.add_argument('--min-tokens', type=int, default=100,
+                        help='Minimum tokens to target per chunk (Goldilocks lower bound)')
+    parser.add_argument('--ideal-tokens', type=int, default=150,
+                        help='Ideal tokens to target per chunk (Goldilocks target)')
+    parser.add_argument('--max-tokens', type=int, default=200,
+                        help='Maximum tokens allowed per chunk (Goldilocks upper bound)')
+    parser.add_argument('--short-merge-max', type=int, default=5,
+                        help='Merge sentences with <= this many tokens into neighbors')
+    parser.add_argument('--long-guard-min', type=int, default=30,
+                        help='Treat neighbors with >= this many tokens as too long to merge into')
     # PDF extraction margins
     def _margin(v: str):
         try:
@@ -93,6 +104,11 @@ def cli_main():
         right=args.right,
         debug_text=args.debug_text,
         debug_text_file=args.debug_text_file,
+        gold_min=args.min_tokens,
+        gold_ideal=args.ideal_tokens,
+        gold_max=args.max_tokens,
+        short_merge_max=args.short_merge_max,
+        long_guard_min=args.long_guard_min,
     )
 
 

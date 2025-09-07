@@ -10,11 +10,11 @@
 - `imgs/`: README images; `samples/`: short audio samples.
 
 ## Build, Test, and Development Commands
-- Install (editable): `python -m pip install -e .`
-- CLI help: `audiblez --help`
-- Run GUI: `audiblez-ui`
-- Run tests: `python -m unittest discover test -v`
-- Optional dep check: `python -m pip install deptry && deptry .`
+- Preferred (uv): `uv sync && uv run audiblez --help`
+- Run GUI (uv): `uv run audiblez-ui`
+- Run tests (uv): `uv run python -m unittest discover test -v`
+- Dev tools (uv): `uv sync -g dev && uv run deptry .`
+- Pip fallback (editable): `python -m pip install -e .`
 
 System prerequisites for audio packaging: install `ffmpeg` and `espeak-ng` (e.g., `brew install ffmpeg espeak-ng` or `sudo apt-get install ffmpeg espeak-ng`).
 
@@ -39,4 +39,3 @@ System prerequisites for audio packaging: install `ffmpeg` and `espeak-ng` (e.g.
 - Do not commit generated audio (`*.wav`, `*.m4b`) or large assets.
 - GPU: CLI supports `--cuda`; Apple Silicon supports `--mps`. Validate fallbacks to CPU.
 - Handle user‑supplied EPUB paths safely; prefer pathlib operations and validate output folders.
-

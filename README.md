@@ -47,6 +47,28 @@ and at the end it will produce a `book.m4b` file with the whole book you can lis
 audiobook player.
 It will only produce the `.m4b` file if you have `ffmpeg` installed on your machine.
 
+## Development with uv
+
+This repository is now uv‑managed for local development. Install prerequisites (`ffmpeg`, `espeak-ng`) via your OS package manager.
+
+Basic workflow:
+
+```
+# Ensure uv is installed: https://docs.astral.sh/uv/
+uv sync                  # create .venv and resolve dependencies
+uv run audiblez --help   # run CLI from the local env
+uv run audiblez-ui       # run GUI
+
+# Run tests
+uv run python -m unittest discover test -v
+
+# Install dev tools
+uv sync -g dev           # include [dependency-groups].dev (e.g., deptry)
+uv run deptry .
+```
+
+uv will generate and update a `uv.lock` lockfile; commit it to the repository. Poetry is no longer required to develop this project.
+
 ## How to run the GUI
 
 The GUI is a simple graphical interface to use audiblez.

@@ -67,15 +67,8 @@ class MlxAudioPipeline:
                 ])
             # Module invocations as fallback
             cmd_variants.extend([
-                # Module invocation using stdin text and file_prefix
+                # Module invocation using explicit 'generate' entry point
                 [sys.executable, "-m", "mlx_audio.tts.generate",
-                 "--model", self.model,
-                 "--voice", voice,
-                 "--speed", str(speed),
-                 "--file_prefix", os.path.splitext(wav_path)[0],
-                 "--audio_format", 'wav', '--join_audio'],
-                # alternate module path (older)
-                [sys.executable, "-m", "mlx_audio.tts",
                  "--model", self.model,
                  "--voice", voice,
                  "--speed", str(speed),

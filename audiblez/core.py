@@ -35,21 +35,53 @@ sample_rate = 24000
 _NLP = None  # cached spaCy model
 
 
-def load_spacy():
-    """Ensure the multilingual spaCy model is available and cached."""
-    global _NLP
+def ensure_pip_available() -> bool:
+    """Ensure `pip` module is importable in this interpreter.
+
+    Some third-party libraries try to invoke `python -m pip` internally for
+    optional components. In uv-managed venvs, pip might be absent by default.
+    We attempt to bootstrap it from the standard library's `ensurepip` without
+    network access. Returns True if pip is available (or made available).
+    """
     try:
-        if not spacy.util.is_package("xx_ent_wiki_sm"):
-            print("Downloading Spacy model xx_ent_wiki_sm...")
-            spacy.cli.download("xx_ent_wiki_sm")
-        if _NLP is None:
+        import pip  # noqa: F401
+        return True
+    except Exception:
+        try:
+            import ensurepip
+            ensurepip.bootstrap()  # installs pip/wheel bundled with CPython
+            import pip  # retry
+            return True
+        except Exception:
+            return False
+
+
+def load_spacy():
+    """Load a spaCy pipeline for sentence segmentation without invoking pip.
+
+    Preference: try 'xx_ent_wiki_sm' if it's already installed. If not, fall
+    back to a blank 'xx' model and add a rule-based 'sentencizer'. This avoids
+    runtime package downloads (which can fail in sandboxed/uv environments).
+    """
+    global _NLP
+    if _NLP is not None:
+        return
+    try:
+        try:
+            # Try to load the multilingual small model if present.
             _NLP = spacy.load('xx_ent_wiki_sm')
-            # Ensure sentence segmentation is available
-            if 'sentencizer' not in _NLP.pipe_names:
-                _NLP.add_pipe('sentencizer')
+        except Exception:
+            print("spaCy model 'xx_ent_wiki_sm' not found; using blank 'xx' with sentencizer.")
+            _NLP = spacy.blank('xx')
+        # Ensure sentence segmentation is available
+        if 'sentencizer' not in _NLP.pipe_names:
+            _NLP.add_pipe('sentencizer')
     except Exception:
         traceback.print_exc()
-        raise
+        # Final fallback: minimal blank pipeline with sentencizer
+        _NLP = spacy.blank('xx')
+        if 'sentencizer' not in _NLP.pipe_names:
+            _NLP.add_pipe('sentencizer')
 
 
 def set_espeak_library():
@@ -92,6 +124,8 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
          debug_text: bool = False, debug_text_file: Optional[str] = None,
          gold_min: int = 50, gold_ideal: int = 100, gold_max: int = 150):
     if post_event: post_event('CORE_STARTED')
+    # Make sure pip exists for libs that may spawn it
+    ensure_pip_available()
     load_spacy()
     if output_folder != '.':
         Path(output_folder).mkdir(parents=True, exist_ok=True)
@@ -413,25 +447,21 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
             for gs, ps, audio in pipeline(buffer_text, voice=voice, speed=speed, split_pattern=r'(?!)'):
                 audio_segments.append(audio)
         except Exception as e:
-            # Only auto-fallback when backend was auto-selected (not explicitly 'mlx')
-            if backend == 'auto':
-                print('MLX backend failed on a chunk; falling back to Kokoro. Reason:', str(e))
-                try:
-                    set_espeak_library()
-                except Exception:
-                    pass
-                try:
-                    fb = create_pipeline('kokoro', voice, mlx_model)
-                    for gs, ps, audio in fb(buffer_text, voice=voice, speed=speed, split_pattern=r'(?!)'):
-                        audio_segments.append(audio)
-                    # Replace pipeline for subsequent chunks
-                    nonlocal_pipeline[0] = fb
-                except Exception:
-                    traceback.print_exc()
-                    raise
-            else:
-                # Surface the exact MLX error to the user
-                print('MLX backend error details:', str(e))
+            # If MLX fails at runtime, always attempt a kokoro fallback so the run doesn't crash.
+            # This covers both explicit 'mlx' and auto-selected MLX.
+            print('MLX backend failed on a chunk; falling back to Kokoro. Reason:', str(e))
+            try:
+                set_espeak_library()
+            except Exception:
+                pass
+            try:
+                fb = create_pipeline('kokoro', voice, mlx_model)
+                for gs, ps, audio in fb(buffer_text, voice=voice, speed=speed, split_pattern=r'(?!)'):
+                    audio_segments.append(audio)
+                # Replace pipeline for subsequent chunks
+                nonlocal_pipeline[0] = fb
+            except Exception:
+                traceback.print_exc()
                 raise
         elapsed = max(time.time() - start_time, 1e-6)
         if stats:

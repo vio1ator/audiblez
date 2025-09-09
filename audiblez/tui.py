@@ -520,7 +520,7 @@ def _single_page_screen(ebook: Optional[Path],
                 m = state['margins']
                 stdscr.addstr(line_local, 0, f"PDF margins [H/F/L/R +/-]: header={m['header']:.02f} footer={m['footer']:.02f} left={m['left']:.02f} right={m['right']:.02f}")
                 line_local += 1
-            stdscr.addstr(line_local, 0, f"Chapters/pages — Space toggle • a All • n None • t Min chars • f File • d Output • p Preview • s Start • q Quit")
+            stdscr.addstr(line_local, 0, f"Chapters/pages — Space toggle • a All • n None • t Min chars • o View text • f File • d Output • p Preview • s Start • q Quit")
             return line_local + 1
         # If initial file not present, wait for user to pick
         while True:
@@ -679,6 +679,30 @@ def _single_page_screen(ebook: Optional[Path],
                     # live refresh
                     line = render_header()
                     stdscr.addstr(line, 0, f"Selected {len(state['selected_set'])}/{len(labels)}")
+                    # Render a live text preview for the current page
+                    try:
+                        if state.get('ebook') and len(labels) > 0:
+                            from .pdf import extract_page_preview
+                            preview_text = extract_page_preview(state['ebook'], state['margins'], page_num=idx + 1)
+                            # Title
+                            try:
+                                stdscr.addstr(line + 1, 0, f"Preview Page {idx + 1} (first lines)")
+                            except curses.error:
+                                pass
+                            # Body
+                            max_rows = max(0, h - (line + 2) - 1)
+                            wmax = max(0, w - 1)
+                            rows_rendered = 0
+                            for ln in (preview_text or '').splitlines():
+                                if rows_rendered >= max_rows:
+                                    break
+                                try:
+                                    stdscr.addstr(line + 2 + rows_rendered, 0, ln[:wmax])
+                                except curses.error:
+                                    pass
+                                rows_rendered += 1
+                    except Exception:
+                        pass
                     stdscr.refresh()
             # Actions
             elif key in (ord('f'),):
@@ -699,6 +723,76 @@ def _single_page_screen(ebook: Optional[Path],
                     message = 'No directory selected'
             elif key in (ord('p'),):
                 return 'preview', state
+            elif key in (ord('o'),):
+                # View full text of current selection (PDF page or chapter)
+                if len(labels) == 0:
+                    continue
+                import curses
+                # Inline modal text viewer
+                def _view_text(stdscr_local, full_text: str, title_text: str):
+                    import textwrap
+                    curses.curs_set(0)
+                    stdscr_local.keypad(True)
+                    top_line = 0
+                    while True:
+                        stdscr_local.erase()
+                        H, W = stdscr_local.getmaxyx()
+                        title_line = f"{title_text} — ↑/k ↓/j PgUp/PgDn q to close"
+                        try:
+                            stdscr_local.addstr(0, 0, title_line[: max(0, W - 1)], curses.A_BOLD)
+                        except curses.error:
+                            pass
+                        # Wrap text to width
+                        wrapped: list[str] = []
+                        for para in (full_text or '').splitlines() or ['']:
+                            wrapped.extend(textwrap.wrap(para, width=max(10, W - 1)) or [''])
+                        view_h = max(1, H - 2)
+                        max_top = max(0, len(wrapped) - view_h)
+                        top_line = min(top_line, max_top)
+                        for r in range(view_h):
+                            i = top_line + r
+                            if i >= len(wrapped):
+                                break
+                            try:
+                                stdscr_local.addstr(1 + r, 0, wrapped[i][: max(0, W - 1)])
+                            except curses.error:
+                                pass
+                        # Footer
+                        footer = f"Lines {top_line + 1}–{min(top_line + view_h, len(wrapped))} of {len(wrapped)}"
+                        try:
+                            stdscr_local.addstr(H - 1, 0, footer[: max(0, W - 1)], curses.A_DIM)
+                        except curses.error:
+                            pass
+                        stdscr_local.refresh()
+                        k = stdscr_local.getch()
+                        if k in (27, ord('q')):
+                            break
+                        elif k in (curses.KEY_UP, ord('k')):
+                            top_line = max(0, top_line - 1)
+                        elif k in (curses.KEY_DOWN, ord('j')):
+                            top_line = min(max_top, top_line + 1)
+                        elif k == curses.KEY_PPAGE:
+                            top_line = max(0, top_line - view_h)
+                        elif k == curses.KEY_NPAGE:
+                            top_line = min(max_top, top_line + view_h)
+                        elif k == curses.KEY_HOME:
+                            top_line = 0
+                        elif k == curses.KEY_END:
+                            top_line = max_top
+
+                try:
+                    if is_pdf and state.get('ebook'):
+                        from .pdf import extract_page_preview
+                        full_text = extract_page_preview(state['ebook'], state['margins'], page_num=idx + 1)
+                        title_text = f"Page {idx + 1} full text"
+                    else:
+                        ch = chapters_all[idx] if 0 <= idx < len(chapters_all) else None
+                        full_text = getattr(ch, 'extracted_text', '') if ch else ''
+                        name = getattr(ch, 'get_name', lambda: f'Item {idx + 1}')()
+                        title_text = f"{name} full text"
+                    _view_text(stdscr, full_text, title_text)
+                except Exception:
+                    message = 'Unable to render full text'
             elif key in (ord('s'), 10, 13):
                 if state['ebook'] is not None and len(state['selected_set']) >= 1:
                     return 'start', state

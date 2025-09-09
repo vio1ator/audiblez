@@ -112,6 +112,48 @@ def extract_pages(file_path: str | Path, margins: Dict[str, float]) -> List[Page
     return chapters
 
 
+def extract_page_preview(file_path: str | Path, margins: Dict[str, float], page_num: int) -> str:
+    """Extract cleaned text for a single page without cross-page stitching.
+
+    Args:
+        file_path: Path to the PDF file.
+        margins: Dict with keys 'header','footer','left','right' each in [0, 0.3].
+        page_num: 1-based page number to extract.
+
+    Returns:
+        Cleaned text content of the page after applying margins.
+    """
+    p = Path(file_path)
+    header = float(margins.get('header', 0.07) or 0)
+    footer = float(margins.get('footer', 0.07) or 0)
+    left = float(margins.get('left', 0.07) or 0)
+    right = float(margins.get('right', 0.07) or 0)
+
+    if page_num < 1:
+        raise ValueError("page_num must be 1-based and >= 1")
+
+    with fitz.open(p) as doc:
+        if page_num > len(doc):
+            return ""
+        page = doc[page_num - 1]
+        rect = page.rect
+        w, h = rect.width, rect.height
+        clip = fitz.Rect(
+            rect.x0 + left * w,
+            rect.y0 + header * h,
+            rect.x1 - right * w,
+            rect.y1 - footer * h,
+        )
+        blocks = page.get_text("blocks", clip=clip) or []
+        blocks.sort(key=lambda b: (round(b[1], 1), round(b[0], 1)))
+        pieces: List[str] = []
+        for b in blocks:
+            text = (b[4] or "").strip()
+            if text:
+                pieces.append(text)
+        return _clean_text("\n".join(pieces))
+
+
 def _stitch_boundary_sentences(chapters: List[PageChapter]) -> None:
     """Move trailing mid‑sentence fragments from page N to the start of N+1.
 

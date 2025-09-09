@@ -16,7 +16,7 @@ except ModuleNotFoundError:
     print(
         "wxPython is required for the GUI.\n"
         "Install with one of:\n"
-        "- uv:  uv sync -g gui   (in this repo)\n"
+        "- uv:  uv sync --group gui   (in this repo)\n"
         "- pip: pip install -e .[gui]   (in this repo)\n"
         "- tool env: ~/.local/share/uv/tools/audiblez/bin/python -m pip install wxPython Pillow\n"
     )

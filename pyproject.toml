@@ -24,6 +24,9 @@ gui = [
     "wxPython>=4.2.1",
     "Pillow>=10.0.0",
 ]
+tui = [
+    "urwid>=2.1.2",
+]
 
 [build-system]
 requires = ["hatchling>=1.18.0"]
@@ -57,4 +60,7 @@ dev = [
 gui = [
     "wxPython>=4.2.1",
     "Pillow>=10.0.0",
+]
+tui = [
+    "urwid>=2.1.2",
 ]

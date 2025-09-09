@@ -63,7 +63,7 @@ uv run audiblez-ui       # run GUI
 uv run python -m unittest discover test -v
 
 # Install dev tools
-uv sync -g dev           # include [dependency-groups].dev (e.g., deptry)
+uv sync --group dev      # include [dependency-groups].dev (e.g., deptry)
 uv run deptry .
 ```
 

@@ -13,7 +13,7 @@
 - Preferred (uv): `uv sync && uv run audiblez --help`
 - Run GUI (uv): `uv run audiblez-ui`
 - Run tests (uv): `uv run python -m unittest discover test -v`
-- Dev tools (uv): `uv sync -g dev && uv run deptry .`
+- Dev tools (uv): `uv sync --group dev && uv run deptry .`
 - Pip fallback (editable): `python -m pip install -e .`
 
 System prerequisites for audio packaging: install `ffmpeg` and `espeak-ng` (e.g., `brew install ffmpeg espeak-ng` or `sudo apt-get install ffmpeg espeak-ng`).

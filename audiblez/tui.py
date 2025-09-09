@@ -1,1149 +1,908 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Terminal UI (TUI) for audiblez.
+"""Audiblez TUI (urwid)
 
-Features:
-- Browse for EPUB/PDF via a simple picker-based file browser.
-- Choose output folder.
-- Select voice, backend, and speed. Device is auto-selected (CUDA/MPS/CPU).
-- For PDF, set header/footer/left/right margins (0–0.3).
-- Select chapters/pages with multiselect and optional audio preview.
-- Run synthesis with progress updates.
+A redesigned, user-friendly terminal UI using urwid.
 
-Requires the existing dependency `pick`.
+Highlights
+- Clear, single-screen workflow: pick file, tune settings, pick chapters/pages
+- Built-in file/directory browser overlays (EPUB/PDF)
+- Quick voice/backend/speed controls; token and PDF margin tuning
+- Chapter/page list with checkboxes, Select All / None / Min chars helpers
+- Preview focused item (generates a short WAV and plays via ffplay/afplay/aplay)
+- Run synthesis with a live progress overlay (non-blocking UI)
+
+Notes
+- Requires the optional dependency: urwid
+  - uv:  uv sync --group tui   (in this repo)
+  - pip: pip install -e .[tui]   (in this repo)
+  - pypi: pip install "audiblez[tui]"
+
 """
 from __future__ import annotations
 
 import os
 import sys
 import fnmatch
+import queue
+import shutil
+import threading
+import traceback
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import List, Optional, Tuple, Set
-import shutil
+from typing import Callable, Iterable, List, Optional, Tuple
+
+try:
+    import urwid  # type: ignore
+except Exception:  # pragma: no cover - graceful message for missing extra
+    print(
+        "urwid is required for the TUI.\n"
+        "Install the optional dependency group:\n"
+        "- uv:  uv sync --group tui   (in this repo)\n"
+        "- pip: pip install -e .[tui]   (in this repo)\n"
+        "- PyPI users: pip install 'audiblez[tui]'\n"
+    )
+    raise
 
 import platform
-
-from pick import pick
 
 from .voices import voices as VOICES_BY_LANG, flags as FLAGS
 from . import core
 
 
-def _list_dir_for_picker(path: Path, patterns: List[str]) -> List[str]:
-    items: List[str] = []
-    # Navigation helpers
-    items.append("..")
-    # Directories
-    for d in sorted([p for p in path.iterdir() if p.is_dir()]):
-        items.append(d.name + "/")
-    # Files matching patterns
-    for f in sorted([p for p in path.iterdir() if p.is_file()]):
-        if any(fnmatch.fnmatch(f.name.lower(), pat) for pat in patterns):
-            items.append(f.name)
-    return items
+# ------------------------------ Utilities ------------------------------
+
+def _flatten_voices() -> List[str]:
+    out: List[str] = []
+    for _, v in VOICES_BY_LANG.items():
+        out.extend(v)
+    return out
 
 
-def _file_browser(start_dir: Path, patterns: List[str]) -> Optional[Path]:
-    cur = start_dir.resolve()
-    while True:
-        title = f"Select file (current: {cur})"
-        options = _list_dir_for_picker(cur, patterns)
-        choice, _ = select_with_letter_jump(options, title, jump_to_folders=True)
-        if choice is None:
-            return None
-        if choice == "..":
-            parent = cur.parent
-            if parent == cur:
-                continue
-            cur = parent
-            continue
-        if choice.endswith("/"):
-            cur = (cur / choice[:-1]).resolve()
-            continue
-        # File
-        sel = (cur / choice).resolve()
-        if sel.is_file():
-            return sel
-
-
-def _dir_browser(start_dir: Path) -> Optional[Path]:
-    cur = start_dir.resolve()
-    while True:
-        title = f"Select output folder (current: {cur})"
-        options = ["[Use this directory]"] + _list_dir_for_picker(cur, patterns=["*"])
-        choice, _ = select_with_letter_jump(options, title, jump_to_folders=True)
-        if choice is None:
-            return None
-        if choice == "[Use this directory]":
-            return cur
-        if choice == "..":
-            parent = cur.parent
-            if parent == cur:
-                continue
-            cur = parent
-            continue
-        if choice.endswith("/"):
-            cur = (cur / choice[:-1]).resolve()
-            continue
-        # Ignore file selection here
-
-
-def _choose_voice() -> str:
-    items: List[str] = []
-    for code, vlist in VOICES_BY_LANG.items():
-        for v in vlist:
-            items.append(f"{FLAGS.get(code, '')} {v}")
-    title = "Select voice"
-    choice, _ = pick(items, title, multiselect=False, min_selection_count=1)
-    return choice.split(" ", 1)[1]
-
-
-def _choose_backend() -> Tuple[str, Optional[str]]:
-    default_model = 'mlx-community/Kokoro-82M-bf16'
-    options = ["auto", "mlx", "kokoro"]
-    backend, _ = pick(options, "Select TTS backend", multiselect=False, min_selection_count=1)
-    mlx_model = default_model
-    if backend == "mlx":
-        # Offer model override via simple text prompt
-        print(f"Enter MLX model id (default: {default_model}): ", end="", flush=True)
-        line = sys.stdin.readline().strip()
-        if line:
-            mlx_model = line
-    return backend, mlx_model
-
-
-def _choose_device():
-    """Auto-select compute device without prompting the user.
-
-    Preference order: CUDA > MPS > CPU.
-    Silently no-ops if torch is unavailable.
-    """
+def _choose_device_auto() -> str:
+    """Auto-select compute device without prompting the user. Returns label."""
     try:
-        import torch
-    except Exception:
-        return
-    chosen = 'cpu'
-    try:
+        import torch  # type: ignore
         if torch.cuda.is_available():
-            chosen = 'cuda'
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            chosen = 'mps'
-        torch.set_default_device(chosen)
-        print(f"Using device: {chosen}")
+            torch.set_default_device("cuda")
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            torch.set_default_device("mps")
+            return "mps"
     except Exception:
-        # If anything goes wrong, just continue on default device.
         pass
+    return "cpu"
 
 
-def _input_float(prompt: str, default: float, lo: float, hi: float) -> float:
-    while True:
-        s = input(f"{prompt} [{default}]: ").strip()
-        if not s:
-            return default
-        try:
-            v = float(s)
-            if lo <= v <= hi:
-                return v
-        except Exception:
-            pass
-        print(f"Enter a number in range [{lo}, {hi}].")
+def _play_audio_blocking(path: str) -> None:
+    """Play a WAV file using available CLI players, blocking until done."""
+    if shutil.which("ffplay"):
+        subprocess.run(["ffplay", "-autoexit", "-nodisp", path])
+        return
+    if platform.system() == "Darwin" and shutil.which("afplay"):
+        subprocess.run(["afplay", path])
+        return
+    if platform.system() == "Linux" and shutil.which("aplay"):
+        subprocess.run(["aplay", path])
+        return
+    if shutil.which("cvlc"):
+        subprocess.run(["cvlc", "--play-and-exit", path])
+        return
+    raise RuntimeError("No suitable audio player found (ffplay/afplay/aplay/cvlc)")
 
 
-def _input_int(prompt: str, default: int, lo: int, hi: int) -> int:
-    while True:
-        s = input(f"{prompt} [{default}]: ").strip()
-        if not s:
-            return default
-        try:
-            v = int(s)
-            if lo <= v <= hi:
-                return v
-        except Exception:
-            pass
-        print(f"Enter an integer in range [{lo}, {hi}].")
+def _file_patterns() -> List[str]:
+    return ["*.epub", "*.pdf"]
 
 
-def _select_chapters_for_epub(book) -> List:
-    from .core import find_document_chapters_and_extract_texts, find_good_chapters, chapter_beginning_one_liner
-    chapters = find_document_chapters_and_extract_texts(book)
-    good = find_good_chapters(chapters)
-    labels = []
-    lengths = []
-    for c in chapters:
-        name = c.get_name()
-        prev = chapter_beginning_one_liner(c, 50)
-        labels.append(f"{name} ({len(c.extracted_text)} chars) [{prev}]")
-        lengths.append(len(c.extracted_text))
-    # Preselect good chapters
-    initial = {i for i, c in enumerate(chapters) if c in good}
-    title = "Select chapters: Space toggle • a:All • n:None • t:Min chars • Enter accept • q quit"
-    idxs = multiselect_with_controls(labels, title, initial_selected=initial, lengths=lengths)
-    selected_objs = [chapters[i] for i in idxs]
-    return chapters, selected_objs
+@dataclass
+class Margins:
+    header: float = 0.07
+    footer: float = 0.07
+    left: float = 0.07
+    right: float = 0.07
 
 
-def _select_chapters_for_pdf(pages) -> List:
-    labels = []
-    lengths = []
-    for p in pages:
-        prev = (p.extracted_text or "").strip().splitlines()[0:1]
-        prev = prev[0][:50] + ('...' if len(prev[0]) > 50 else '') if prev else ''
-        labels.append(f"{p.get_name()} ({len(p.extracted_text)} chars) [{prev}]")
-        lengths.append(len(p.extracted_text or ""))
-    # Default: select all pages initially
-    initial = set(range(len(pages)))
-    title = "Select pages: Space toggle • a:All • n:None • t:Min chars • Enter accept • q quit"
-    idxs = multiselect_with_controls(labels, title, initial_selected=initial, lengths=lengths)
-    selected_pages = [p for i, p in enumerate(pages) if i in idxs]
-    return pages, selected_pages
+# ------------------------------ Overlays ------------------------------
+
+class Modal:
+    """Minimal modal overlay helper."""
+
+    def __init__(self, loop: urwid.MainLoop, frame_provider: Callable[[], urwid.Widget]):
+        self.loop = loop
+        self._frame_provider = frame_provider
+        self._stack: List[urwid.Widget] = []
+
+    def open(self, w: urwid.Widget, width=90, height=80, title: Optional[str] = None) -> None:
+        if title:
+            w = urwid.LineBox(w, title)
+        # Use a BOX filler so inner Piles receive (maxcol, maxrow) and weighted
+        # items can expand vertically (fixes one-line list issue in dialogs).
+        overlay = urwid.Overlay(
+            urwid.Filler(w, valign="top", height=("relative", 100)),
+            self._frame_provider(),
+            align="center",
+            width=("relative", width),
+            valign="middle",
+            height=("relative", height),
+        )
+        self._stack.append(self.loop.widget)
+        self.loop.widget = overlay
+
+    def close(self) -> None:
+        if self._stack:
+            self.loop.widget = self._stack.pop()
 
 
-def multiselect_with_controls(options: List[str], title: str, initial_selected: Optional[Set[int]] = None, lengths: Optional[List[int]] = None) -> List[int]:
-    """Curses multiselect with select-all/none and min-length selection.
+class VoicePicker(urwid.WidgetWrap):
+    """Filterable voice picker. Calls on_done(voice) or on_cancel()."""
 
-    Keys: arrows/jk move, space toggle, a select all, n select none, t set min chars,
-    letters jump, Enter accept (requires >=1), q cancel.
-    Returns selected indices list.
+    def __init__(self, voices: Iterable[str], on_done: Callable[[str], None], on_cancel: Callable[[], None]):
+        self.on_done = on_done
+        self.on_cancel = on_cancel
+        self.all_voices = list(voices)
+        self.edit = urwid.Edit("Filter: ")
+        self.listbox = urwid.ListBox(urwid.SimpleFocusListWalker([]))
+        self.hint = urwid.Text("Enter to select • Esc to cancel")
+        hint_pad = urwid.Padding(self.hint, left=0, right=0)
+        self._refresh()
+        pile = urwid.Pile([
+            (urwid.PACK, urwid.Padding(self.edit, left=0, right=0)),
+            (urwid.PACK, urwid.Divider()),
+            ("weight", 1, self.listbox),
+            (urwid.PACK, urwid.Divider()),
+            (urwid.PACK, hint_pad),
+        ])
+        super().__init__(pile)
+
+    def _refresh(self) -> None:
+        q = (self.edit.edit_text or "").strip().lower()
+        items = []
+        for v in self.all_voices:
+            if not q or q in v.lower():
+                items.append(urwid.AttrMap(urwid.SelectableIcon(v, 0), None, focus_map="reversed"))
+        self.listbox.body[:] = items
+        if items:
+            self.listbox.focus_position = 0
+
+    def keypress(self, size, key):  # noqa: D401
+        if key == "esc":
+            self.on_cancel()
+            return None
+        if key == "enter":
+            try:
+                w = self.listbox.get_focus()[0]
+                voice = w.original_widget.get_text()[0]
+                self.on_done(voice)
+                return None
+            except Exception:
+                pass
+        ret = super().keypress(size, key)
+        if key not in ("up", "down", "page up", "page down", "enter", "esc"):
+            self._refresh()
+        return ret
+
+
+class FileBrowser(urwid.WidgetWrap):
+    """Simple in-app file browser.
+
+    - If select_dir is True, returns a directory via on_done(Path)
+    - Otherwise returns a file matching patterns
     """
-    try:
-        import curses
-    except Exception:
-        # Fallback to pick's multiselect (without advanced shortcuts)
-        try:
-            selected = pick(options, title, multiselect=True, min_selection_count=1)
-            return [i for (_, i) in selected]
-        except Exception as e2:
-            print("Selection failed:", e2)
-            raise
 
-    initial_selected = set(initial_selected or set())
+    def __init__(self, start_dir: Path, patterns: List[str], select_dir: bool,
+                 on_done: Callable[[Path], None], on_cancel: Callable[[], None]):
+        self.cur = start_dir.resolve()
+        self.patterns = patterns
+        self.select_dir = select_dir
+        self.on_done = on_done
+        self.on_cancel = on_cancel
 
-    def _prompt_threshold(stdscr) -> Optional[int]:
-        h, w = stdscr.getmaxyx()
-        prompt = "Min chars: "
-        buf = ""
-        while True:
-            stdscr.move(h - 1, 0)
-            stdscr.clrtoeol()
+        self.title = urwid.Text("")
+        title_pad = urwid.Padding(self.title, left=0, right=0)
+        self.listbox = urwid.ListBox(urwid.SimpleFocusListWalker([]))
+        self._refresh()
+        pile = urwid.Pile([
+            (urwid.PACK, title_pad),
+            (urwid.PACK, urwid.Divider()),
+            ("weight", 1, self.listbox),
+            (urwid.PACK, urwid.Divider()),
+            (urwid.PACK, urwid.Padding(urwid.Text("Enter select • Backspace up • Esc cancel • letters jump"), left=0, right=0)),
+        ])
+        super().__init__(pile)
+
+    def _list_dir(self) -> List[str]:
+        items: List[str] = []
+        if self.select_dir:
+            items.append("[Use this directory]")
+        items.append("..")
+        for d in sorted([p for p in self.cur.iterdir() if p.is_dir()]):
+            items.append(d.name + "/")
+        for f in sorted([p for p in self.cur.iterdir() if p.is_file()]):
+            if any(fnmatch.fnmatch(f.name.lower(), pat) for pat in self.patterns):
+                items.append(f.name)
+        return items
+
+    def _refresh(self):
+        self.title.set_text(f"Current: {self.cur}")
+        items = []
+        for s in self._list_dir():
+            items.append(urwid.AttrMap(urwid.SelectableIcon(s, 0), None, focus_map="reversed"))
+        self.listbox.body[:] = items
+        if items:
+            self.listbox.focus_position = 0
+
+    def keypress(self, size, key):
+        if key == "esc":
+            self.on_cancel(); return None
+        if key == "backspace":
+            parent = self.cur.parent
+            if parent != self.cur:
+                self.cur = parent
+                self._refresh()
+            return None
+        if key == "enter":
             try:
-                stdscr.addstr(h - 1, 0, prompt + buf)
-            except curses.error:
-                pass
-            ch = stdscr.getch()
-            if ch in (10, 13):
-                try:
-                    return int(buf) if buf else None
-                except Exception:
+                label = self.listbox.get_focus()[0].original_widget.get_text()[0]
+            except Exception:
+                return None
+            if self.select_dir and label == "[Use this directory]":
+                self.on_done(self.cur)
+                return None
+            if label == "..":
+                parent = self.cur.parent
+                if parent != self.cur:
+                    self.cur = parent
+                    self._refresh()
+                return None
+            if label.endswith("/"):
+                self.cur = (self.cur / label[:-1]).resolve()
+                self._refresh(); return None
+            if not self.select_dir:
+                p = (self.cur / label).resolve()
+                if p.exists() and p.is_file():
+                    self.on_done(p)
                     return None
-            elif ch in (27,):
-                return None
-            elif ch in (curses.KEY_BACKSPACE, 127, 8):
-                buf = buf[:-1]
-            elif 48 <= ch <= 57:  # digits
-                if len(buf) < 9:
-                    buf += chr(ch)
-
-    def _run(stdscr):
-        curses.curs_set(0)
-        stdscr.keypad(True)
-        idx = 0
-        top = 0
-        selected: Set[int] = set(initial_selected)
-        message = ""
-        while True:
-            stdscr.erase()
-            h, w = stdscr.getmaxyx()
-            vis_h = max(1, h - 4)
-            # Adjust scrolling window
-            if idx < top:
-                top = idx
-            elif idx >= top + vis_h:
-                top = idx - vis_h + 1
-
-            # Title and help
-            title_str = (title or "")[: max(0, w - 1)]
-            try:
-                stdscr.addstr(0, 0, title_str, curses.A_BOLD)
-            except curses.error:
-                pass
-            hint = "Space toggle • a All • n None • t Min chars • Enter accept • q quit"
-            try:
-                stdscr.addstr(1, 0, hint[: max(0, w - 1)])
-            except curses.error:
-                pass
-            status = f"Selected {len(selected)}/{len(options)}"
-            try:
-                stdscr.addstr(2, 0, status[: max(0, w - 1)])
-            except curses.error:
-                pass
-
-            # Render list
-            for row in range(vis_h):
-                j = top + row
-                if j >= len(options):
+            return None
+        # First-letter jump
+        if len(key) == 1 and key.isprintable():
+            target = key.lower()
+            for i, w in enumerate(self.listbox.body):
+                s = w.original_widget.get_text()[0]
+                if s.lower().startswith(target):
+                    self.listbox.focus_position = i
                     break
-                is_sel = j in selected
-                checkbox = "[x]" if is_sel else "[ ]"
-                line = options[j]
-                text = f"{checkbox} {line}"
-                try:
-                    stdscr.addstr(3 + row, 0, text[: max(0, w - 1)], curses.A_REVERSE if j == idx else curses.A_NORMAL)
-                except curses.error:
-                    pass
-
-            if message:
-                try:
-                    stdscr.addstr(h - 2, 0, message[: max(0, w - 1)], curses.A_DIM)
-                except curses.error:
-                    pass
-
-            stdscr.refresh()
-
-            key = stdscr.getch()
-            message = ""
-            if key in (curses.KEY_UP, ord('k')):
-                idx = max(0, idx - 1)
-            elif key in (curses.KEY_DOWN, ord('j')):
-                idx = min(len(options) - 1, idx + 1)
-            elif key == curses.KEY_PPAGE:
-                idx = max(0, idx - vis_h)
-            elif key == curses.KEY_NPAGE:
-                idx = min(len(options) - 1, idx + vis_h)
-            elif key in (32,):  # space
-                if idx in selected:
-                    selected.remove(idx)
-                else:
-                    selected.add(idx)
-            elif key in (ord('a'),):
-                selected = set(range(len(options)))
-            elif key in (ord('n'),):
-                selected.clear()
-            elif key in (ord('t'),):
-                thr = _prompt_threshold(stdscr)
-                if thr is not None and lengths is not None:
-                    selected = {i for i, L in enumerate(lengths) if L >= thr}
-                elif thr is None:
-                    message = "Threshold canceled"
-                else:
-                    message = "No lengths available"
-            elif key in (10, 13, curses.KEY_ENTER):
-                if len(selected) >= 1:
-                    return sorted(selected)
-                else:
-                    message = "Select at least 1 item"
-            elif key in (27, ord('q')):
-                return None
-            elif 32 <= key <= 126:
-                ch = chr(key)
-                # Jump to first entry starting with letter
-                for k, s in enumerate(options):
-                    if s.lower().startswith(ch.lower()):
-                        idx = k
-                        break
-
-    res = __import__('curses').wrapper(_run)
-    if res is None:
-        raise RuntimeError("Selection canceled")
-    return res
+            return None
+        return super().keypress(size, key)
 
 
-def _preview_loop(chapters, voice: str, speed: float, backend: str, mlx_model: str):
-    # Allow previewing multiple times until user selects "Done".
-    while True:
-        opts = [f"{i+1}. {getattr(c, 'get_name', lambda: f'Chapter {i+1}')()}" for i, c in enumerate(chapters)]
-        opts.append("[Done]")
+# ------------------------------ Main UI ------------------------------
+
+class AudiblezTUI:
+    def __init__(self) -> None:
+        self.palette = [
+            ("reversed", "standout", ""),
+            ("title", "light cyan,bold", ""),
+            ("hint", "dark gray", ""),
+            ("label", "light gray", ""),
+            ("ok", "light green", ""),
+            ("bad", "light red", ""),
+        ]
+
+        # State
+        self.file_path: Optional[Path] = None
+        self.out_dir: Path = Path.cwd()
+        self.is_pdf: bool = False
+        self.margins = Margins()
+        self.voices = _flatten_voices()
+        self.voice: str = self.voices[0] if self.voices else "af_sky"
+        self.backend: str = "auto"  # auto|mlx|kokoro
+        self.mlx_model: str = "mlx-community/Kokoro-82M-8bit"
+        self.speed: float = 1.0
+        self.gold_min: int = 10
+        self.gold_ideal: int = 25
+        self.gold_max: int = 40
+        self.device: str = _choose_device_auto()
+
+        # Document
+        self.items: List[object] = []  # chapters or PageChapter
+        self.labels: List[str] = []
+        self.lengths: List[int] = []
+        self.selected: set[int] = set()
+
+        # Build widgets
+        self.header = urwid.Text(("title", "Audiblez — Generate Audiobooks from EPUB/PDF"))
+        self.header_hint = urwid.Text(("hint", "Tab/Shift+Tab to move • Enter to press • q to quit"))
+        header_pad = urwid.Padding(self.header, left=0, right=0)
+        header_hint_pad = urwid.Padding(self.header_hint, left=0, right=0)
+
+        self.file_label = urwid.Text(("label", "File: "))
+        self.file_value = urwid.Text("[select an EPUB/PDF]")
+        self.file_btn = urwid.Button("Browse", on_press=self._browse_file)
+
+        self.out_label = urwid.Text(("label", "Output: "))
+        self.out_value = urwid.Text(str(self.out_dir))
+        self.out_btn = urwid.Button("Browse", on_press=self._browse_outdir)
+
+        self.voice_btn = urwid.Button(f"Voice: {self.voice}", on_press=self._choose_voice)
+        # Backend radios
+        self.rb_auto = urwid.RadioButton([], "Backend: auto", state=True, on_state_change=self._backend_changed)
+        self.rb_mlx = urwid.RadioButton([self.rb_auto], "MLX", state=False, on_state_change=self._backend_changed)
+        self.rb_kok = urwid.RadioButton([self.rb_auto], "Kokoro", state=False, on_state_change=self._backend_changed)
+        self.model_edit = urwid.Edit("MLX model: ", self.mlx_model)
+        self.speed_edit = urwid.Edit("Speed (0.5–2.0): ", "1.0")
+        self.device_text = urwid.Text(("label", f"Device: {self.device}"))
+
+        # Token group
+        self.min_edit = urwid.IntEdit("Min tokens: ", default=self.gold_min)
+        self.ideal_edit = urwid.IntEdit("Ideal: ", default=self.gold_ideal)
+        self.max_edit = urwid.IntEdit("Max: ", default=self.gold_max)
+
+        # PDF margins
+        self.header_edit = urwid.Edit("Header [0–0.3]: ", str(self.margins.header))
+        self.footer_edit = urwid.Edit("Footer [0–0.3]: ", str(self.margins.footer))
+        self.left_edit = urwid.Edit("Left [0–0.3]: ", str(self.margins.left))
+        self.right_edit = urwid.Edit("Right [0–0.3]: ", str(self.margins.right))
+        self._update_margin_visibility()
+
+        # Chapter list (custom to catch Tab)
+        class ChaptersList(urwid.ListBox):
+            def __init__(self, body, on_tab: Callable[[], None]):
+                super().__init__(body)
+                self._on_tab = on_tab
+            def keypress(self, size, key):
+                if key in ("tab", "ctrl i"):
+                    try:
+                        self._on_tab()
+                        return None
+                    except Exception:
+                        pass
+                return super().keypress(size, key)
+
+        self.listbox = ChaptersList(urwid.SimpleFocusListWalker([]), on_tab=lambda: self._focus_actions_row())
+
+        # Action buttons
+        self.btn_select_all = urwid.Button("Select All", on_press=self._select_all)
+        self.btn_select_none = urwid.Button("Select None", on_press=self._select_none)
+        self.btn_min_chars = urwid.Button("Min chars…", on_press=self._select_min_chars)
+        self.btn_view_text = urwid.Button("View text", on_press=self._view_current_text)
+        self.btn_preview = urwid.Button("Preview", on_press=self._preview_current)
+        self.btn_start = urwid.Button("Start", on_press=self._start)
+
+        self.footer = urwid.Text(("hint", "Space toggles a checkbox • Use the buttons below to manage selections"))
+        footer_pad = urwid.Padding(self.footer, left=0, right=0)
+
+        # Layout
+        file_row = urwid.Columns([
+            (10, self.file_label), ("weight", 2, self.file_value), (12, self.file_btn)
+        ], dividechars=1)
+        out_row = urwid.Columns([
+            (10, self.out_label), ("weight", 2, self.out_value), (12, self.out_btn)
+        ], dividechars=1)
+        source_box = urwid.LineBox(
+            urwid.Pile([(urwid.PACK, file_row), (urwid.PACK, out_row)]),
+            title="Source & Output",
+        )
+
+        backend_row = urwid.Columns([
+            ("weight", 1, self.rb_auto), ("weight", 1, self.rb_mlx), ("weight", 1, self.rb_kok),
+        ], dividechars=2)
+        settings_items = [
+            self.voice_btn,
+            backend_row,
+            self.model_edit,
+            self.speed_edit,
+            self.device_text,
+            urwid.Divider(),
+            urwid.Columns([("weight", 1, self.min_edit), ("weight", 1, self.ideal_edit), ("weight", 1, self.max_edit)], dividechars=2),
+            urwid.Divider(),
+            urwid.Columns([("weight", 1, self.header_edit), ("weight", 1, self.footer_edit), ("weight", 1, self.left_edit), ("weight", 1, self.right_edit)], dividechars=2),
+        ]
+        settings_box = urwid.LineBox(
+            urwid.Pile([(urwid.PACK, w) for w in settings_items]),
+            title="Settings",
+        )
+
+        # Actions row (catch Shift+Tab to go back)
+        class ActionsRow(urwid.Columns):
+            def __init__(self, contents, on_back: Callable[[], None], **kwargs):
+                super().__init__(contents, **kwargs)
+                self._on_back = on_back
+            def keypress(self, size, key):
+                if key in ("shift tab", "backtab"):
+                    try:
+                        self._on_back()
+                        return None
+                    except Exception:
+                        pass
+                return super().keypress(size, key)
+
+        self.actions_row = ActionsRow([
+            (12, urwid.AttrMap(self.btn_select_all, None, focus_map="reversed")),
+            (14, urwid.AttrMap(self.btn_select_none, None, focus_map="reversed")),
+            (12, urwid.AttrMap(self.btn_min_chars, None, focus_map="reversed")),
+            (12, urwid.AttrMap(self.btn_view_text, None, focus_map="reversed")),
+            (10, urwid.AttrMap(self.btn_preview, None, focus_map="reversed")),
+            (10, urwid.AttrMap(self.btn_start, None, focus_map="reversed")),
+        ], on_back=lambda: self._focus_chapter_list(), dividechars=1)
+
+        # Keep handles to chapters layout parts for focus management
+        self.chapters_pile = urwid.Pile([
+            ("weight", 1, self.listbox),
+            (urwid.PACK, urwid.Divider()),
+            (urwid.PACK, self.actions_row),
+        ])
+        # Indices within chapters pile
+        self._chapters_list_idx = 0
+        self._chapters_actions_idx = 2
+
+        self.chapters_box = urwid.LineBox(
+            self.chapters_pile,
+            title="Chapters / Pages",
+        )
+
+        self.body = urwid.Pile([
+            (urwid.PACK, header_pad),
+            (urwid.PACK, header_hint_pad),
+            (urwid.PACK, urwid.Divider()),
+            (urwid.PACK, source_box),
+            (urwid.PACK, urwid.Divider()),
+            (urwid.PACK, settings_box),
+            (urwid.PACK, urwid.Divider()),
+            ("weight", 1, self.chapters_box),
+            (urwid.PACK, urwid.Divider()),
+            (urwid.PACK, footer_pad),
+        ])
+        self.frame = urwid.Frame(body=self.body)
+        self.loop = urwid.MainLoop(
+            self.frame,
+            self.palette,
+            unhandled_input=self._unhandled,
+            input_filter=self._input_filter,
+        )
+        self.modal = Modal(self.loop, lambda: self.frame)
+
+        # Synthesis thread + queue
+        self._worker: Optional[threading.Thread] = None
+        self._queue: "queue.Queue[Tuple[str, dict]]" = queue.Queue()
+        self._progress_overlay: Optional[urwid.Widget] = None
+        self._progress_text = urwid.Text("")
+        self._progress_bar = urwid.ProgressBar("ok", "bad", current=0, done=100)
+
+    # ------------------------------ Wiring ------------------------------
+
+    def _unhandled(self, key):  # noqa: D401
+        if key in ("q", "Q") and not self._worker:
+            raise urwid.ExitMainLoop()
+
+    def _in_chapters_box(self) -> bool:
         try:
-            choice, idx = select_with_letter_jump(opts, "Select a chapter/page to preview", jump_to_folders=False)
-        except Exception as e:
-            print("Preview selection failed:", e)
-            return
-        if choice is None:
-            # User canceled (q/Esc). Exit preview loop gracefully.
-            return
-        if choice == "[Done]":
-            return
-        chapter = chapters[idx]
-        text = (chapter.extracted_text or "")[:300]
-        if not text.strip():
-            print("Chapter is empty – nothing to preview.")
-            continue
+            if self.frame.focus_part != "body":
+                return False
+            w, _ = self.body.get_focus()
+            return w is self.chapters_box
+        except Exception:
+            return False
+
+    def _input_filter(self, keys, raw):
+        # Intercept Tab before widgets handle it so we can jump
+        # directly between the chapter list and the action buttons.
+        if not keys:
+            return keys
         try:
-            tmp = NamedTemporaryFile(suffix='.wav', delete=False)
-            core.gen_text(text, voice=voice, output_file=tmp.name, speed=speed, play=False, backend=backend, mlx_model=mlx_model)
+            if os.environ.get("AUDIBLEZ_TUI_DEBUG_KEYS"):
+                # Helpful for diagnosing terminal key names
+                try:
+                    print("keys:", keys, "raw:", [repr(x) for x in (raw or [])])
+                except Exception:
+                    pass
+            for key in keys:
+                if key in ("tab", "ctrl i") and self._in_chapters_box() and self.chapters_pile.focus_position == self._chapters_list_idx:
+                    # Jump to action buttons, focus first button
+                    self.chapters_pile.focus_position = self._chapters_actions_idx
+                    try:
+                        self.actions_row.focus_position = 0
+                    except Exception:
+                        pass
+                    return []  # swallow key
+                if key in ("shift tab", "backtab") and self._in_chapters_box() and self.chapters_pile.focus_position == self._chapters_actions_idx:
+                    # Jump back to the list
+                    self.chapters_pile.focus_position = self._chapters_list_idx
+                    return []
+        except Exception:
+            pass
+        return keys
+
+    # ----- Focus helpers for chapters/actions
+    def _focus_actions_row(self) -> None:
+        try:
+            # Ensure chapters box is focused in body
+            try:
+                self.body.set_focus(self.chapters_box)
+            except Exception:
+                pass
+            self.chapters_pile.focus_position = self._chapters_actions_idx
+            try:
+                self.actions_row.focus_position = 0
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _focus_chapter_list(self) -> None:
+        try:
+            try:
+                self.body.set_focus(self.chapters_box)
+            except Exception:
+                pass
+            self.chapters_pile.focus_position = self._chapters_list_idx
+        except Exception:
+            pass
+
+    def _backend_changed(self, btn: urwid.RadioButton, state: bool) -> None:
+        if not state:
+            return
+        if btn is self.rb_auto:
+            self.backend = "auto"
+        elif btn is self.rb_mlx:
+            self.backend = "mlx"
+        else:
+            self.backend = "kokoro"
+        self._update_margin_visibility()  # just redraw
+
+    def _update_margin_visibility(self) -> None:
+        show = bool(self.file_path and self.is_pdf)
+        for w in (self.header_edit, self.footer_edit, self.left_edit, self.right_edit):
+            w.set_caption(w.caption if show else f"{w.caption.split('[')[0].strip()} (PDF only): ")
+
+    # ------------------------------ Loaders ------------------------------
+
+    def _browse_file(self, *_):
+        def done(p: Path):
+            self.modal.close()
+            self._load_file(p)
+
+        def cancel():
+            self.modal.close()
+
+        fb = FileBrowser(Path.cwd(), _file_patterns(), select_dir=False, on_done=done, on_cancel=cancel)
+        self.modal.open(fb, width=95, height=90, title="Select EPUB or PDF")
+
+    def _browse_outdir(self, *_):
+        def done(p: Path):
+            self.modal.close()
+            self.out_dir = p
+            self.out_value.set_text(str(self.out_dir))
+
+        def cancel():
+            self.modal.close()
+
+        fb = FileBrowser(self.out_dir, ["*"], select_dir=True, on_done=done, on_cancel=cancel)
+        self.modal.open(fb, width=95, height=90, title="Select Output Folder")
+
+    def _choose_voice(self, *_):
+        def done(v: str):
+            self.modal.close()
+            self.voice = v
+            self.voice_btn.set_label(f"Voice: {self.voice}")
+
+        def cancel():
+            self.modal.close()
+
+        picker = VoicePicker(self.voices, on_done=done, on_cancel=cancel)
+        self.modal.open(picker, height=80, title="Select Voice")
+
+    def _load_file(self, path: Path) -> None:
+        self.file_path = path
+        self.file_value.set_text(str(path))
+        self.is_pdf = path.suffix.lower() == ".pdf"
+        self._update_margin_visibility()
+        try:
+            if self.is_pdf:
+                from .pdf import extract_pages
+                self.items = extract_pages(path, {
+                    "header": float(self.header_edit.edit_text or self.margins.header),
+                    "footer": float(self.footer_edit.edit_text or self.margins.footer),
+                    "left": float(self.left_edit.edit_text or self.margins.left),
+                    "right": float(self.right_edit.edit_text or self.margins.right),
+                })
+                self.selected = set(range(len(self.items)))
+            else:
+                from ebooklib import epub  # type: ignore
+                from .core import find_document_chapters_and_extract_texts, find_good_chapters, chapter_beginning_one_liner
+                book = epub.read_epub(str(path))
+                all_ch = find_document_chapters_and_extract_texts(book)
+                good = find_good_chapters(all_ch)
+                self.items = all_ch
+                self.selected = {i for i, c in enumerate(all_ch) if c in good}
+            self._rebuild_labels()
+            self._rebuild_listbox()
+        except Exception:
+            traceback.print_exc()
+            self.items = []
+            self.selected = set()
+            self._rebuild_labels()
+            self._rebuild_listbox()
+
+    def _rebuild_labels(self) -> None:
+        self.labels = []
+        self.lengths = []
+        if not self.items:
+            return
+        if self.is_pdf:
+            for p in self.items:
+                # type: ignore[attr-defined]
+                text = (p.extracted_text or "").strip()
+                prev = text.splitlines()[0:1]
+                prev = prev[0][:50] + ("..." if len(prev[0]) > 50 else "") if prev else ""
+                name = p.get_name()
+                self.labels.append(f"{name} ({len(text)} chars) [{prev}]")
+                self.lengths.append(len(text))
+        else:
+            from .core import chapter_beginning_one_liner
+            for c in self.items:
+                name = c.get_name()
+                prev = chapter_beginning_one_liner(c, 50)
+                self.labels.append(f"{name} ({len(c.extracted_text)} chars) [{prev}]")
+                self.lengths.append(len(c.extracted_text))
+
+    def _rebuild_listbox(self) -> None:
+        body = []
+        for i, label in enumerate(self.labels):
+            cb = urwid.CheckBox(label, state=(i in self.selected))
+            def toggled(chk, state, idx=i):
+                if state:
+                    self.selected.add(idx)
+                else:
+                    self.selected.discard(idx)
+            urwid.connect_signal(cb, 'change', toggled)
+            body.append(urwid.AttrMap(cb, None, focus_map="reversed"))
+        self.listbox.body[:] = body
+
+    # ------------------------------ Selection helpers ------------------------------
+
+    def _select_all(self, *_):
+        self.selected = set(range(len(self.labels)))
+        self._rebuild_listbox()
+
+    def _select_none(self, *_):
+        self.selected = set()
+        self._rebuild_listbox()
+
+    def _select_min_chars(self, *_):
+        def ok(btn):
+            try:
+                thr = int(edit.edit_text.strip() or "0")
+            except Exception:
+                thr = 0
+            self.selected = {i for i, L in enumerate(self.lengths) if L >= thr}
+            self.modal.close()
+            self._rebuild_listbox()
+
+        def cancel(btn):
+            self.modal.close()
+
+        edit = urwid.Edit("Minimum characters: ", "500")
+        actions = urwid.Columns([(10, urwid.Button("OK", on_press=ok)), (10, urwid.Button("Cancel", on_press=cancel))])
+        self.modal.open(
+            urwid.Pile([
+                (urwid.PACK, edit),
+                (urwid.PACK, urwid.Divider()),
+                (urwid.PACK, actions),
+            ]),
+            height=30,
+            title="Select by minimum length",
+        )
+
+    def _get_focused_index(self) -> Optional[int]:
+        try:
+            pos = self.listbox.focus_position
+        except Exception:
+            return None
+        return int(pos)
+
+    def _current_item_text(self) -> str:
+        idx = self._get_focused_index()
+        if idx is None or idx >= len(self.items):
+            return ""
+        if self.is_pdf:
+            return self.items[idx].extracted_text or ""
+        return self.items[idx].extracted_text
+
+    def _view_current_text(self, *_):
+        text = self._current_item_text() or ""
+        text_w = urwid.Text(text)
+        close_btn = urwid.Button("Close", on_press=lambda *_: self.modal.close())
+        pile = urwid.Pile([
+            ("weight", 1, urwid.Filler(urwid.Padding(text_w, left=1, right=1), valign="top")),
+            (urwid.PACK, urwid.Divider()),
+            (urwid.PACK, close_btn),
+        ])
+        self.modal.open(pile, height=90, title="Full text")
+
+    # ------------------------------ Preview & Run ------------------------------
+
+    def _preview_current(self, *_):
+        if not self.items:
+            return
+        try:
+            idx = self._get_focused_index()
+            if idx is None:
+                return
+            text = self._current_item_text()
+            if not text or len(text.strip()) < 5:
+                self._notify("Nothing to preview for this item")
+                return
+            _choose_device_auto()
+            tmp = NamedTemporaryFile(suffix=".wav", delete=False)
+            # Resolve backend for 'auto'
+            backend = self.backend
+            try:
+                from .tts_backends import has_mlx_audio  # type: ignore
+                if backend == "auto":
+                    backend = "mlx" if has_mlx_audio() else "kokoro"
+            except Exception:
+                backend = "kokoro" if backend == "auto" else backend
+            core.gen_text(
+                text, voice=self.voice, output_file=tmp.name,
+                speed=float(self.speed_edit.edit_text or "1.0"),
+                play=False, backend=backend, mlx_model=self.model_edit.edit_text or self.mlx_model,
+            )
             _play_audio_blocking(tmp.name)
             try:
                 os.unlink(tmp.name)
             except Exception:
                 pass
-        except Exception as e:
-            print("Preview failed:", e)
-
-
-def _post_event(event_name, **kwargs):
-    if event_name == 'CORE_STARTED':
-        print("Synthesis started.")
-    elif event_name == 'CORE_CHAPTER_STARTED':
-        print(f"Chapter {kwargs.get('chapter_index')} started.")
-    elif event_name == 'CORE_CHAPTER_FINISHED':
-        print(f"Chapter {kwargs.get('chapter_index')} finished.")
-    elif event_name == 'CORE_PROGRESS':
-        stats = kwargs.get('stats')
-        if stats:
-            print(f"Progress: {stats.progress}% | ETA: {stats.eta} | Rate: {getattr(stats, 'chars_per_sec', 0):.0f} chars/s")
-    elif event_name == 'CORE_FINISHED':
-        print("Synthesis finished.")
-
-
-def _flatten_voices() -> List[str]:
-    res: List[str] = []
-    for _, vlist in VOICES_BY_LANG.items():
-        res.extend(vlist)
-    return res
-
-
-def _single_page_screen(ebook: Optional[Path],
-                        out_dir: Path,
-                        is_pdf: bool,
-                        initial_margins: dict,
-                        chapters_all: List,
-                        initially_selected: List,
-                        ) -> Tuple[str, dict]:
-    """Run a single-page curses UI. Returns (action, state).
-
-    action in {'start', 'preview', 'quit'}.
-    state contains: voice, speed, backend, mlx_model, margins, token thresholds, selected_chapters.
-    """
-    voices_flat = _flatten_voices()
-
-    state = {
-        'voice': initially_selected and voices_flat[0] or voices_flat[0],
-        'speed': 1.0,
-        'backend': 'auto',
-        'mlx_model': 'mlx-community/Kokoro-82M-bf16',
-        'gold_min': 10,
-        'gold_ideal': 25,
-        'gold_max': 40,
-        'margins': dict(initial_margins),
-        'selected_set': set(range(len(chapters_all))) if is_pdf else {i for i, c in enumerate(chapters_all) if c in initially_selected},
-        'ebook': ebook,
-        'out_dir': out_dir,
-    }
-
-    # helper to format device (auto-selected)
-    def detect_device_label() -> str:
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return 'cuda'
-            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                return 'mps'
         except Exception:
-            pass
-        return 'cpu'
+            traceback.print_exc()
+            self._notify("Preview failed (see logs)")
 
-    device_label = detect_device_label()
+    def _notify(self, message: str) -> None:
+        text = urwid.Text(message)
+        btn = urwid.Button("OK", on_press=lambda *_: self.modal.close())
+        self.modal.open(
+            urwid.Pile([
+                (urwid.PACK, urwid.Padding(text, left=0, right=0)),
+                (urwid.PACK, urwid.Divider()),
+                (urwid.PACK, btn),
+            ]),
+            height=30,
+            title="Info",
+        )
 
-    # Precompute chapter labels and lengths
-    def build_labels_and_lengths():
-        labels = []
-        lengths = []
-        if chapters_all and is_pdf:
-            for p in chapters_all:
-                prev = (p.extracted_text or '').strip().splitlines()[0:1]
-                prev = prev[0][:50] + ('...' if len(prev[0]) > 50 else '') if prev else ''
-                labels.append(f"{p.get_name()} ({len(p.extracted_text or '')} chars) [{prev}]")
-                lengths.append(len(p.extracted_text or ''))
-        elif chapters_all:
-            from .core import chapter_beginning_one_liner
-            for c in chapters_all:
-                name = c.get_name()
-                prev = chapter_beginning_one_liner(c, 50)
-                labels.append(f"{name} ({len(c.extracted_text)} chars) [{prev}]")
-                lengths.append(len(c.extracted_text))
-        return labels, lengths
-
-    labels, lengths = build_labels_and_lengths()
-
-    # helpers to (re)load chapters when ebook changes
-    def load_from_file(path: Path):
-        nonlocal is_pdf, chapters_all, initially_selected, labels, lengths
-        is_pdf = path.suffix.lower() == '.pdf'
-        state['margins'] = dict(initial_margins)
+    def _start(self, *_):
+        if not self.file_path:
+            self._notify("Select an EPUB/PDF first")
+            return
+        if not self.selected:
+            self._notify("Select at least one chapter/page")
+            return
+        # Prepare selection
+        selected_items = [self.items[i] for i in sorted(self.selected)]
+        backend = self.backend
         try:
-            if is_pdf:
-                from .pdf import extract_pages
-                chapters_all = extract_pages(path, state['margins'])
-                initially_selected = chapters_all
-                state['selected_set'] = set(range(len(chapters_all)))
-            else:
-                from ebooklib import epub
-                from .core import find_document_chapters_and_extract_texts, find_good_chapters
-                book = epub.read_epub(str(path))
-                ch = find_document_chapters_and_extract_texts(book)
-                good = find_good_chapters(ch)
-                chapters_all = ch
-                initially_selected = good
-                state['selected_set'] = {i for i, c in enumerate(chapters_all) if c in initially_selected}
+            from .tts_backends import has_mlx_audio  # type: ignore
+            if backend == "auto":
+                backend = "mlx" if has_mlx_audio() else "kokoro"
         except Exception:
-            chapters_all = []
-            initially_selected = []
-            state['selected_set'] = set()
-        labels, lengths = build_labels_and_lengths()
+            backend = "kokoro" if backend == "auto" else backend
 
-    def run(stdscr):
-        import curses
-        curses.curs_set(0)
-        stdscr.keypad(True)
-        idx = 0
-        top = 0
-        message = ''
-        voice_idx = 0
-        
-        def render_header(body_start_line: int = 5) -> int:
-            """Render the top fixed header and return next line index."""
-            stdscr.erase()
-            h, w = stdscr.getmaxyx()
-            # Header
-            file_str = str(state['ebook']) if state['ebook'] else '[press f to choose file]'
-            out_str = str(state['out_dir'])
-            header = f"Audiblez TUI — Single Page | File: {file_str} | Out: {out_str}"
-            stdscr.addstr(0, 0, header[: max(0, w - 1)], curses.A_BOLD)
-            # Parameters
-            stdscr.addstr(1, 0, f"Voice [v/shift+v]: {state['voice']}")
-            stdscr.addstr(2, 0, f"Backend [b]: {state['backend']}" + (f"  Model [m]: {state['mlx_model']}" if state['backend'] == 'mlx' else ''))
-            stdscr.addstr(3, 0, f"Speed [-/=]: {state['speed']:.2f}    Device: {device_label}")
-            stdscr.addstr(4, 0, f"Chunk tokens [1/2/3 +/-]: min/ideal/max = {state['gold_min']}/{state['gold_ideal']}/{state['gold_max']}")
-            line_local = body_start_line
-            if is_pdf:
-                m = state['margins']
-                stdscr.addstr(line_local, 0, f"PDF margins [H/F/L/R +/-]: header={m['header']:.02f} footer={m['footer']:.02f} left={m['left']:.02f} right={m['right']:.02f}")
-                line_local += 1
-            stdscr.addstr(line_local, 0, f"Chapters/pages — Space toggle • a All • n None • t Min chars • o View text • f File • d Output • p Preview • s Start • q Quit")
-            return line_local + 1
-        # If initial file not present, wait for user to pick
-        while True:
-            # Re-assert keypad mode in case a sub-view changed terminal mode
-            stdscr.keypad(True)
-            h, w = stdscr.getmaxyx()
-            vis_h = max(3, h - 12)  # rows for list
-            line = render_header()
+        # Launch worker thread
+        args = dict(
+            file_path=str(self.file_path),
+            voice=self.voice,
+            speed=float(self.speed_edit.edit_text or "1.0"),
+            backend=backend,
+            mlx_model=self.model_edit.edit_text or self.mlx_model,
+            output_folder=str(self.out_dir),
+            gold_min=int((self.min_edit.edit_text or str(self.gold_min)).strip() or self.gold_min),
+            gold_ideal=int((self.ideal_edit.edit_text or str(self.gold_ideal)).strip() or self.gold_ideal),
+            gold_max=int((self.max_edit.edit_text or str(self.gold_max)).strip() or self.gold_max),
+        )
+        margins = {
+            "header": float(self.header_edit.edit_text or self.margins.header),
+            "footer": float(self.footer_edit.edit_text or self.margins.footer),
+            "left": float(self.left_edit.edit_text or self.margins.left),
+            "right": float(self.right_edit.edit_text or self.margins.right),
+        }
 
-            # Adjust scrolling window for list area starting at 'line'
-            # show status
-            selected = state['selected_set']
-            total = len(labels)
-            stdscr.addstr(line, 0, f"Selected {len(selected)}/{total}")
-            line += 1
+        def post_event(name: str, **kwargs):
+            self._queue.put((name, kwargs))
 
-            if total > 0:
-                if idx < top:
-                    top = idx
-                elif idx >= top + (h - line - 2):
-                    top = max(0, idx - (h - line - 3))
-
-            # Render list
-            rows = max(1, h - line - 2)
-            if total == 0:
-                try:
-                    stdscr.addstr(line, 0, 'No chapters/pages loaded. Press f to choose a file.')
-                except curses.error:
-                    pass
-            else:
-                for row in range(rows):
-                    j = top + row
-                    if j >= total:
-                        break
-                    is_sel = j in selected
-                    checkbox = '[x]' if is_sel else '[ ]'
-                    text = f"{checkbox} {labels[j]}"
-                    try:
-                        stdscr.addstr(line + row, 0, text[: max(0, w - 1)], curses.A_REVERSE if j == idx else curses.A_NORMAL)
-                    except curses.error:
-                        pass
-
-            # Footer message
-            if message:
-                try:
-                    stdscr.addstr(h - 1, 0, message[: max(0, w - 1)], curses.A_DIM)
-                except curses.error:
-                    pass
-            stdscr.refresh()
-
-            # Input
-            key = stdscr.getch()
-            message = ''
-
-            # Navigation in list
-            if key in (curses.KEY_UP, ord('k')) and len(labels) > 0:
-                idx = max(0, idx - 1)
-            elif key in (curses.KEY_DOWN, ord('j')) and len(labels) > 0:
-                idx = min(len(labels) - 1, idx + 1)
-            elif key == curses.KEY_PPAGE and len(labels) > 0:
-                idx = max(0, idx - rows)
-            elif key == curses.KEY_NPAGE and len(labels) > 0:
-                idx = min(len(labels) - 1, idx + rows)
-            # Toggle selection
-            elif key == 32 and len(labels) > 0:  # space
-                if idx in selected:
-                    selected.remove(idx)
+        def worker():
+            try:
+                _choose_device_auto()
+                if self.is_pdf:
+                    core.main(
+                        args["file_path"], args["voice"], pick_manually=False, speed=args["speed"],
+                        output_folder=args["output_folder"], selected_chapters=selected_items,
+                        backend=args["backend"], mlx_model=args["mlx_model"],
+                        header=margins["header"], footer=margins["footer"], left=margins["left"], right=margins["right"],
+                        gold_min=args["gold_min"], gold_ideal=args["gold_ideal"], gold_max=args["gold_max"],
+                        post_event=post_event,
+                    )
                 else:
-                    selected.add(idx)
-            elif key in (ord('a'),):
-                state['selected_set'] = set(range(len(labels)))
-            elif key in (ord('n'),):
-                state['selected_set'] = set()
-                selected = state['selected_set']
-            elif key in (ord('t'),):
-                # Prompt line for threshold
-                curses.echo()
-                try:
-                    stdscr.move(h - 1, 0)
-                    stdscr.clrtoeol()
-                    stdscr.addstr(h - 1, 0, 'Min chars: ')
-                    thr_str = stdscr.getstr(h - 1, len('Min chars: '), 16).decode('utf-8')
-                    thr = int(thr_str) if thr_str else None
-                    if thr is not None and len(lengths) > 0:
-                        state['selected_set'] = {i for i, L in enumerate(lengths) if L >= thr}
-                        selected = state['selected_set']
-                except Exception:
-                    message = 'Invalid threshold'
-                finally:
-                    curses.noecho()
-            # Voice cycle
-            elif key in (ord('v'),):
-                voice_idx = (voice_idx + 1) % len(voices_flat)
-                state['voice'] = voices_flat[voice_idx]
-            elif key in (ord('V'),):
-                voice_idx = (voice_idx - 1) % len(voices_flat)
-                state['voice'] = voices_flat[voice_idx]
-            # Backend toggle
-            elif key in (ord('b'),):
-                order = ['auto', 'mlx', 'kokoro']
-                cur = state['backend']
-                state['backend'] = order[(order.index(cur) + 1) % len(order)] if cur in order else 'auto'
-            # Model input if mlx
-            elif key in (ord('m'),):
-                if state['backend'] == 'mlx':
-                    curses.echo()
+                    core.main(
+                        args["file_path"], args["voice"], pick_manually=False, speed=args["speed"],
+                        output_folder=args["output_folder"], selected_chapters=selected_items,
+                        backend=args["backend"], mlx_model=args["mlx_model"],
+                        gold_min=args["gold_min"], gold_ideal=args["gold_ideal"], gold_max=args["gold_max"],
+                        post_event=post_event,
+                    )
+            except Exception:
+                traceback.print_exc()
+                self._queue.put(("ERROR", {"message": "Synthesis failed; see logs"}))
+            finally:
+                self._queue.put(("DONE", {}))
+
+        # Progress overlay UI
+        self._progress_text.set_text("Preparing…")
+        self._progress_bar.set_completion(0)
+        overlay = urwid.Pile([
+            (urwid.PACK, urwid.Padding(urwid.Text("Synthesis in progress — this may take a while…"), left=0, right=0)),
+            (urwid.PACK, urwid.Divider()),
+            (urwid.PACK, self._progress_bar),
+            (urwid.PACK, urwid.Divider()),
+            ("weight", 1, urwid.Filler(urwid.Padding(self._progress_text, left=1, right=1), valign="top")),
+        ])
+        self._progress_overlay = overlay
+        self.modal.open(overlay, height=70, title="Working…")
+
+        # Start worker + poller
+        self._worker = threading.Thread(target=worker, daemon=True)
+        self._worker.start()
+        self.loop.set_alarm_in(0.1, self._poll_queue)
+
+    def _poll_queue(self, *_):
+        updated = False
+        while True:
+            try:
+                name, data = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            updated = True
+            if name == "CORE_STARTED":
+                self._progress_text.set_text("Started…")
+            elif name == "CORE_PROGRESS":
+                st = data.get("stats")
+                if st is not None:
+                    # stats.progress, stats.eta, stats.chars_per_sec
                     try:
-                        stdscr.move(h - 1, 0)
-                        stdscr.clrtoeol()
-                        stdscr.addstr(h - 1, 0, f"MLX model id [{state['mlx_model']}]: ")
-                        s = stdscr.getstr(h - 1, len(f"MLX model id [{state['mlx_model']}]: "), 128).decode('utf-8').strip()
-                        if s:
-                            state['mlx_model'] = s
-                    finally:
-                        curses.noecho()
-            # Speed adjust
-            elif key in (ord('-'), ord('_')):
-                state['speed'] = max(0.5, round(state['speed'] - 0.05, 2))
-            elif key in (ord('='), ord('+')):
-                state['speed'] = min(2.0, round(state['speed'] + 0.05, 2))
-            # Tokens adjust (1=min, 2=ideal, 3=max) with +/-
-            elif key in (ord('1'), ord('2'), ord('3')):
-                # peek next char for +/-
-                sub = {ord('1'): 'gold_min', ord('2'): 'gold_ideal', ord('3'): 'gold_max'}[key]
-                stdscr.addstr(h - 1, 0, f"Adjust {sub} with +/- (Esc to cancel)")
-                while True:
-                    ch = stdscr.getch()
-                    if ch in (27,):
-                        break
-                    if ch in (ord('-'), ord('_')):
-                        state[sub] = max(10, state[sub] - 5)
-                    elif ch in (ord('+'), ord('=')):
-                        state[sub] = min(500, state[sub] + 5)
-                    else:
-                        break
-                    # live refresh
-                    line = render_header()
-                    # Re-render status and a tiny slice of list header
-                    stdscr.addstr(line, 0, f"Selected {len(state['selected_set'])}/{len(labels)}")
-                    stdscr.refresh()
-            # Margins adjust
-            elif is_pdf and key in (ord('H'), ord('F'), ord('L'), ord('R')):
-                mapk = {ord('H'): 'header', ord('F'): 'footer', ord('L'): 'left', ord('R'): 'right'}
-                which = mapk[key]
-                stdscr.addstr(h - 1, 0, f"Adjust {which} with +/- (Esc to cancel)")
-                while True:
-                    ch = stdscr.getch()
-                    if ch in (27,):
-                        break
-                    if ch in (ord('-'), ord('_')):
-                        state['margins'][which] = max(0.0, round(state['margins'][which] - 0.01, 2))
-                    elif ch in (ord('+'), ord('=')):
-                        state['margins'][which] = min(0.3, round(state['margins'][which] + 0.01, 2))
-                    else:
-                        break
-                    # live refresh
-                    line = render_header()
-                    stdscr.addstr(line, 0, f"Selected {len(state['selected_set'])}/{len(labels)}")
-                    # Render a live text preview for the current page
-                    try:
-                        if state.get('ebook') and len(labels) > 0:
-                            from .pdf import extract_page_preview
-                            preview_text = extract_page_preview(state['ebook'], state['margins'], page_num=idx + 1)
-                            # Title
-                            try:
-                                stdscr.addstr(line + 1, 0, f"Preview Page {idx + 1} (first lines)")
-                            except curses.error:
-                                pass
-                            # Body
-                            max_rows = max(0, h - (line + 2) - 1)
-                            wmax = max(0, w - 1)
-                            rows_rendered = 0
-                            for ln in (preview_text or '').splitlines():
-                                if rows_rendered >= max_rows:
-                                    break
-                                try:
-                                    stdscr.addstr(line + 2 + rows_rendered, 0, ln[:wmax])
-                                except curses.error:
-                                    pass
-                                rows_rendered += 1
+                        self._progress_bar.set_completion(int(getattr(st, "progress", 0)))
                     except Exception:
                         pass
-                    stdscr.refresh()
-            # Actions
-            elif key in (ord('f'),):
-                # inline file picker
-                new_ebook = _browse_within_curses(stdscr, Path.cwd(), patterns=["*.epub", "*.pdf"], select_dir=False)
-                if new_ebook:
-                    state['ebook'] = new_ebook
-                    load_from_file(new_ebook)
-                    idx = 0
-                    top = 0
-                else:
-                    message = 'No file selected'
-            elif key in (ord('d'),):
-                new_dir = _browse_within_curses(stdscr, Path.cwd(), patterns=["*"], select_dir=True)
-                if new_dir:
-                    state['out_dir'] = new_dir
-                else:
-                    message = 'No directory selected'
-            elif key in (ord('p'),):
-                return 'preview', state
-            elif key in (ord('o'),):
-                # View full text of current selection (PDF page or chapter)
-                if len(labels) == 0:
-                    continue
-                import curses
-                # Inline modal text viewer
-                def _view_text(stdscr_local, full_text: str, title_text: str):
-                    import textwrap
-                    curses.curs_set(0)
-                    stdscr_local.keypad(True)
-                    top_line = 0
-                    while True:
-                        stdscr_local.erase()
-                        H, W = stdscr_local.getmaxyx()
-                        title_line = f"{title_text} — ↑/k ↓/j PgUp/PgDn q to close"
-                        try:
-                            stdscr_local.addstr(0, 0, title_line[: max(0, W - 1)], curses.A_BOLD)
-                        except curses.error:
-                            pass
-                        # Wrap text to width
-                        wrapped: list[str] = []
-                        for para in (full_text or '').splitlines() or ['']:
-                            wrapped.extend(textwrap.wrap(para, width=max(10, W - 1)) or [''])
-                        view_h = max(1, H - 2)
-                        max_top = max(0, len(wrapped) - view_h)
-                        top_line = min(top_line, max_top)
-                        for r in range(view_h):
-                            i = top_line + r
-                            if i >= len(wrapped):
-                                break
-                            try:
-                                stdscr_local.addstr(1 + r, 0, wrapped[i][: max(0, W - 1)])
-                            except curses.error:
-                                pass
-                        # Footer
-                        footer = f"Lines {top_line + 1}–{min(top_line + view_h, len(wrapped))} of {len(wrapped)}"
-                        try:
-                            stdscr_local.addstr(H - 1, 0, footer[: max(0, W - 1)], curses.A_DIM)
-                        except curses.error:
-                            pass
-                        stdscr_local.refresh()
-                        k = stdscr_local.getch()
-                        if k in (27, ord('q')):
-                            break
-                        elif k in (curses.KEY_UP, ord('k')):
-                            top_line = max(0, top_line - 1)
-                        elif k in (curses.KEY_DOWN, ord('j')):
-                            top_line = min(max_top, top_line + 1)
-                        elif k == curses.KEY_PPAGE:
-                            top_line = max(0, top_line - view_h)
-                        elif k == curses.KEY_NPAGE:
-                            top_line = min(max_top, top_line + view_h)
-                        elif k == curses.KEY_HOME:
-                            top_line = 0
-                        elif k == curses.KEY_END:
-                            top_line = max_top
+                    self._progress_text.set_text(
+                        f"Progress: {getattr(st, 'progress', 0)}%\n"
+                        f"ETA: {getattr(st, 'eta', '?')}\n"
+                        f"Rate: {getattr(st, 'chars_per_sec', 0):.0f} chars/s"
+                    )
+            elif name == "CORE_CHAPTER_STARTED":
+                self._progress_text.set_text("Starting next chapter…")
+            elif name == "CORE_CHAPTER_FINISHED":
+                self._progress_text.set_text("Chapter finished.")
+            elif name == "CORE_FINISHED":
+                self._progress_text.set_text("Done. Creating m4b…")
+            elif name == "ERROR":
+                self._progress_text.set_text(data.get("message", "Error"))
+            elif name == "DONE":
+                self.modal.close()
+                self._worker = None
+        if self._worker:
+            self.loop.set_alarm_in(0.2, self._poll_queue)
 
-                try:
-                    if is_pdf and state.get('ebook'):
-                        from .pdf import extract_page_preview
-                        full_text = extract_page_preview(state['ebook'], state['margins'], page_num=idx + 1)
-                        title_text = f"Page {idx + 1} full text"
-                    else:
-                        ch = chapters_all[idx] if 0 <= idx < len(chapters_all) else None
-                        full_text = getattr(ch, 'extracted_text', '') if ch else ''
-                        name = getattr(ch, 'get_name', lambda: f'Item {idx + 1}')()
-                        title_text = f"{name} full text"
-                    _view_text(stdscr, full_text, title_text)
-                except Exception:
-                    message = 'Unable to render full text'
-            elif key in (ord('s'), 10, 13):
-                if state['ebook'] is not None and len(state['selected_set']) >= 1:
-                    return 'start', state
-                else:
-                    message = 'Pick a file (f) and select at least one chapter/page'
-            elif key in (27, ord('q')):
-                return 'quit', state
-            elif 32 <= key <= 126:
-                # first-letter jump in list
-                ch = chr(key)
-                for k, s in enumerate(labels):
-                    if s.lower().startswith(ch.lower()):
-                        idx = k
-                        break
+    # ------------------------------ Run ------------------------------
 
-    action, final_state = __import__('curses').wrapper(run)
-    return action, final_state
+    def run(self) -> None:
+        self.loop.run()
 
 
-def main():
-    print("Audiblez TUI — generate audiobooks from EPUB/PDF\n")
-    # Start directly in the single-page screen; user can choose file/dir inside it.
-    ebook: Optional[Path] = None
-    out_dir = Path.cwd()
-    is_pdf = False
-    margins = dict(header=0.07, footer=0.07, left=0.07, right=0.07)
-    chapters_all: List = []
-    initially_selected: List = []
-
-    while True:
-        action, state = _single_page_screen(ebook, out_dir, is_pdf, margins, chapters_all, initially_selected)
-        if action == 'quit' or action is None:
-            print('Canceled.')
-            return
-        if action == 'preview':
-            ebook = state['ebook']
-            out_dir = state['out_dir']
-            margins = state['margins']
-            if ebook is None:
-                print('No file selected.')
-                continue
-            # Build chapters from current ebook
-            is_pdf = ebook.suffix.lower() == '.pdf'
-            if is_pdf:
-                from .pdf import extract_pages
-                chapters_all = extract_pages(ebook, margins)
-            else:
-                from ebooklib import epub
-                from .core import find_document_chapters_and_extract_texts
-                book = epub.read_epub(str(ebook))
-                chapters_all = find_document_chapters_and_extract_texts(book)
-            if not chapters_all:
-                print('No chapters/pages available.')
-                continue
-            selected = [chapters_all[i] for i in sorted(state['selected_set'])]
-            _preview_loop(selected, state['voice'], state['speed'], state['backend'], state['mlx_model'])
-            # loop back to screen
-            continue
-        if action == 'start':
-            ebook = state['ebook']
-            out_dir = state['out_dir']
-            if ebook is None:
-                print('No file selected.')
-                return
-            # Ensure MLX backend availability before jumping in
-            chosen_backend = state['backend']
-            try:
-                from .tts_backends import has_mlx_audio
-            except Exception:
-                has_mlx_audio = lambda: False  # type: ignore
-            # Only warn-block when user explicitly selects MLX but it's unavailable.
-            # For 'auto', we will fall back to Kokoro below without blocking.
-            if chosen_backend == 'mlx' and not has_mlx_audio():
-                print("MLX-Audio is not installed. Install optional deps and retry:\n  uv sync -E mlx\nOr in pip env: pip install 'audiblez[mlx]'\nSwitch backend to Kokoro (press b) to continue without MLX.")
-                continue
-            # Recompute chapter list from current ebook and margins to ensure up-to-date
-            is_pdf = ebook.suffix.lower() == '.pdf'
-            if is_pdf and not chapters_all:
-                from .pdf import extract_pages
-                chapters_all = extract_pages(ebook, state['margins'])
-            elif (not is_pdf) and not chapters_all:
-                from ebooklib import epub
-                from .core import find_document_chapters_and_extract_texts
-                book = epub.read_epub(str(ebook))
-                chapters_all = find_document_chapters_and_extract_texts(book)
-            selected = [chapters_all[i] for i in sorted(state['selected_set'])]
-            # Resolve effective backend for 'auto'
-            eb = state['backend']
-            try:
-                from .tts_backends import has_mlx_audio
-                if eb == 'auto':
-                    eb = 'mlx' if has_mlx_audio() else 'kokoro'
-            except Exception:
-                if eb == 'auto':
-                    eb = 'kokoro'
-            backend = eb
-            mlx_model = state['mlx_model']
-            speed = state['speed']
-            voice = state['voice']
-            gold_min, gold_ideal, gold_max = state['gold_min'], state['gold_ideal'], state['gold_max']
-            m = state['margins']
-            # choose device automatically
-            _choose_device()
-
-            print("Starting synthesis...\n")
-            core.main(
-                str(ebook), voice, pick_manually=False, speed=speed,
-                output_folder=str(out_dir), selected_chapters=selected,
-                backend=backend, mlx_model=mlx_model,
-                header=m.get('header', 0.07), footer=m.get('footer', 0.07),
-                left=m.get('left', 0.07), right=m.get('right', 0.07),
-                gold_min=gold_min, gold_ideal=gold_ideal, gold_max=gold_max,
-                post_event=_post_event,
-            )
-            return
+def main() -> None:
+    """Entrypoint for `audiblez-tui`."""
+    app = AudiblezTUI()
+    app.run()
 
 
-def select_with_letter_jump(options: List[str], title: str, jump_to_folders: bool = True, start_index: int = 0):
-    """Curses-based selector with first-letter jump to folder.
-
-    Returns (choice, index) or (None, None) on cancel/failure.
-    """
-    try:
-        import curses
-    except Exception as e:
-        # Fallback to pick if curses unavailable
-        try:
-            return pick(options, title, multiselect=False, min_selection_count=1)
-        except Exception as e2:
-            print("Selection failed:", e2)
-            return None, None
-
-    def _run(stdscr):
-        curses.curs_set(0)
-        stdscr.keypad(True)
-        idx = min(max(0, start_index), max(0, len(options) - 1))
-        top = 0
-        while True:
-            stdscr.erase()
-            h, w = stdscr.getmaxyx()
-            vis_h = max(1, h - 3)
-            # Adjust scrolling window
-            if idx < top:
-                top = idx
-            elif idx >= top + vis_h:
-                top = idx - vis_h + 1
-
-            # Render
-            title_str = (title or "")[: max(0, w - 1)]
-            try:
-                stdscr.addstr(0, 0, title_str, curses.A_BOLD)
-            except curses.error:
-                pass
-            hint = (
-                "Arrows/jk move • letters jump to folder • Enter select • q quit"
-                if jump_to_folders else
-                "Arrows/jk move • letters jump • Enter select • q quit"
-            )
-            try:
-                stdscr.addstr(1, 0, hint[: max(0, w - 1)])
-            except curses.error:
-                pass
-            for row in range(vis_h):
-                j = top + row
-                if j >= len(options):
-                    break
-                line = options[j]
-                mark = ">" if j == idx else " "
-                text = f"{mark} {line}"
-                try:
-                    stdscr.addstr(2 + row, 0, text[: max(0, w - 1)], curses.A_REVERSE if j == idx else curses.A_NORMAL)
-                except curses.error:
-                    pass
-            stdscr.refresh()
-
-            key = stdscr.getch()
-            if key in (curses.KEY_UP, ord('k')):
-                idx = max(0, idx - 1)
-            elif key in (curses.KEY_DOWN, ord('j')):
-                idx = min(len(options) - 1, idx + 1)
-            elif key == curses.KEY_PPAGE:
-                idx = max(0, idx - vis_h)
-            elif key == curses.KEY_NPAGE:
-                idx = min(len(options) - 1, idx + vis_h)
-            elif key in (10, 13, curses.KEY_ENTER):
-                return idx
-            elif key in (27, ord('q')):
-                return None
-            elif 32 <= key <= 126:  # printable ASCII
-                ch = chr(key)
-                # Prefer folders ending with '/'
-                def starts_with(s: str, c: str) -> bool:
-                    return s.lower().startswith(c.lower())
-
-                match_idx = None
-                if jump_to_folders:
-                    for k, s in enumerate(options):
-                        if s.endswith('/') and starts_with(s, ch):
-                            match_idx = k
-                            break
-                if match_idx is None:
-                    for k, s in enumerate(options):
-                        if starts_with(s, ch):
-                            match_idx = k
-                            break
-                if match_idx is not None:
-                    idx = match_idx
-            # loop continues
-
-    try:
-        res = __import__('curses').wrapper(_run)
-    except Exception:
-        try:
-            return pick(options, title, multiselect=False, min_selection_count=1)
-        except Exception as e:
-            print("Selection failed:", e)
-            return None, None
-    if res is None:
-        return None, None
-    return options[res], res
-
-
-def _inline_pick(stdscr, options: List[str], title: str, jump_to_folders: bool = False, start_index: int = 0):
-    """Single-select picker that reuses the current curses screen (no wrapper).
-
-    Returns the selected index, or None if canceled.
-    """
-    import curses
-    curses.curs_set(0)
-    stdscr.keypad(True)
-    idx = min(max(0, start_index), max(0, len(options) - 1))
-    top = 0
-    while True:
-        stdscr.erase()
-        h, w = stdscr.getmaxyx()
-        vis_h = max(1, h - 3)
-        # Adjust scrolling window
-        if idx < top:
-            top = idx
-        elif idx >= top + vis_h:
-            top = idx - vis_h + 1
-
-        # Render
-        title_str = (title or "")[: max(0, w - 1)]
-        try:
-            stdscr.addstr(0, 0, title_str, curses.A_BOLD)
-        except curses.error:
-            pass
-        hint = (
-            "Arrows/jk move • letters jump to folder • Enter select • q quit"
-            if jump_to_folders else
-            "Arrows/jk move • letters jump • Enter select • q quit"
-        )
-        try:
-            stdscr.addstr(1, 0, hint[: max(0, w - 1)])
-        except curses.error:
-            pass
-        for row in range(vis_h):
-            j = top + row
-            if j >= len(options):
-                break
-            line = options[j]
-            mark = ">" if j == idx else " "
-            text = f"{mark} {line}"
-            try:
-                stdscr.addstr(2 + row, 0, text[: max(0, w - 1)], curses.A_REVERSE if j == idx else curses.A_NORMAL)
-            except curses.error:
-                pass
-        stdscr.refresh()
-
-        key = stdscr.getch()
-        if key in (curses.KEY_UP, ord('k')):
-            idx = max(0, idx - 1)
-        elif key in (curses.KEY_DOWN, ord('j')):
-            idx = min(len(options) - 1, idx + 1)
-        elif key == curses.KEY_PPAGE:
-            idx = max(0, idx - vis_h)
-        elif key == curses.KEY_NPAGE:
-            idx = min(len(options) - 1, idx + vis_h)
-        elif key in (10, 13, curses.KEY_ENTER):
-            return idx
-        elif key in (27, ord('q')):
-            return None
-        elif 32 <= key <= 126:  # printable ASCII
-            ch = chr(key)
-            # Prefer folders ending with '/'
-            def starts_with(s: str, c: str) -> bool:
-                return s.lower().startswith(c.lower())
-
-            match_idx = None
-            if jump_to_folders:
-                for k, s in enumerate(options):
-                    if s.endswith('/') and starts_with(s, ch):
-                        match_idx = k
-                        break
-            if match_idx is None:
-                for k, s in enumerate(options):
-                    if starts_with(s, ch):
-                        match_idx = k
-                        break
-            if match_idx is not None:
-                idx = match_idx
-
-
-def _browse_within_curses(stdscr, start_dir: Path, patterns: List[str], select_dir: bool = False) -> Optional[Path]:
-    """Inline file/folder browser that stays within current curses context."""
-    cur = start_dir.resolve()
-    while True:
-        if select_dir:
-            title = f"Select output folder (current: {cur})"
-            options = ["[Use this directory]"] + _list_dir_for_picker(cur, patterns=["*"])
-        else:
-            title = f"Select file (current: {cur})"
-            options = _list_dir_for_picker(cur, patterns)
-        idx = _inline_pick(stdscr, options, title, jump_to_folders=True, start_index=0)
-        if idx is None:
-            return None
-        choice = options[idx]
-        if select_dir and choice == "[Use this directory]":
-            return cur
-        if choice == "..":
-            parent = cur.parent
-            if parent != cur:
-                cur = parent
-            continue
-        if choice.endswith('/'):
-            cur = (cur / choice[:-1]).resolve()
-            continue
-        if not select_dir:  # file
-            sel = (cur / choice).resolve()
-            if sel.is_file():
-                return sel
-
-def _play_audio_blocking(path: str):
-    # Prefer ffplay if available, otherwise use platform-appropriate players.
-    if shutil.which('ffplay'):
-        subprocess.run(['ffplay', '-autoexit', '-nodisp', path])
-        return
-    if platform.system() == 'Darwin' and shutil.which('afplay'):
-        subprocess.run(['afplay', path])
-        return
-    if platform.system() == 'Linux' and shutil.which('aplay'):
-        subprocess.run(['aplay', path])
-        return
-    # Last resort: try vlc
-    if shutil.which('cvlc'):
-        subprocess.run(['cvlc', '--play-and-exit', path])
-        return
-    print('No suitable audio player found (ffplay/afplay/aplay/cvlc).')
-    return
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

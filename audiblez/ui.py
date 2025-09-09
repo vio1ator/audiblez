@@ -10,7 +10,17 @@ import platform
 import subprocess
 import io
 import os
-import wx
+try:
+    import wx
+except ModuleNotFoundError:
+    print(
+        "wxPython is required for the GUI.\n"
+        "Install with one of:\n"
+        "- uv:  uv sync -g gui   (in this repo)\n"
+        "- pip: pip install -e .[gui]   (in this repo)\n"
+        "- tool env: ~/.local/share/uv/tools/audiblez/bin/python -m pip install wxPython Pillow\n"
+    )
+    raise
 from wx.lib.newevent import NewEvent
 from wx.lib.scrolledpanel import ScrolledPanel
 from PIL import Image

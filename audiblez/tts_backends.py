@@ -105,7 +105,8 @@ class KokoroPipelineWrapper:
 
     def __init__(self, lang_code: str) -> None:
         from kokoro import KPipeline  # late import to avoid import cost when unused
-        self.pipeline = KPipeline(lang_code=lang_code)
+        use_trf = lang_code.lower() in ('a', 'b')  # English voices benefit from transformer G2P
+        self.pipeline = KPipeline(lang_code=lang_code, trf=use_trf)
         # Force Misaki-only G2P so the runtime never falls back to espeak-ng.
         try:
             if getattr(self.pipeline, 'lang_code', '').lower() in ('a', 'b'):

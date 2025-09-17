@@ -12,6 +12,8 @@
 Audiblez generates `.m4b` audiobooks from regular `.epub` e-books,
 using Kokoro's high-quality speech synthesis.
 
+English voices are phonemized with Misaki out of the box, so there is no espeak-ng prerequisite.
+
 [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) is a recently published text-to-speech model with just 82M params and very natural sounding output.
 It's released under Apache licence and it was trained on < 100 hours of audio.
 It currently supports these languages: 🇺🇸 🇬🇧 🇪🇸 🇫🇷 🇮🇳 🇮🇹 🇯🇵 🇧🇷 🇨🇳
@@ -24,15 +26,15 @@ On my M2 MacBook Pro, on CPU, it takes about 1 hour, at a rate of about 60 chara
 ## How to install the Command Line tool
 
 If you have Python 3 on your computer, you can install it with pip.
-You also need `espeak-ng` and `ffmpeg` installed on your machine:
+You also need `ffmpeg` installed on your machine for `.m4b` packaging:
 
 ```bash
-sudo apt install ffmpeg espeak-ng                   # on Ubuntu/Debian 🐧
+sudo apt install ffmpeg                              # on Ubuntu/Debian 🐧
 pip install audiblez
 ```
 
 ```bash
-brew install ffmpeg espeak-ng                       # on Mac 🍏
+brew install ffmpeg                                 # on Mac 🍏
 pip install audiblez
 ```
 
@@ -49,7 +51,7 @@ It will only produce the `.m4b` file if you have `ffmpeg` installed on your mach
 
 ## Development with uv
 
-This repository is now uv‑managed for local development. Install prerequisites (`ffmpeg`, `espeak-ng`) via your OS package manager.
+This repository is now uv‑managed for local development. Install prerequisites (`ffmpeg`) via your OS package manager.
 
 Basic workflow:
 
@@ -75,7 +77,7 @@ The GUI is a simple graphical interface to use audiblez.
 You need some extra dependencies to run the GUI:
 
 ```
-sudo apt install ffmpeg espeak-ng 
+sudo apt install ffmpeg
 sudo apt install libgtk-3-dev        # just for Ubuntu/Debian 🐧, Windows/Mac don't need this
   
 pip install audiblez pillow wxpython

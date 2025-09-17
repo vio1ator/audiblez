@@ -16,7 +16,7 @@
 - Dev tools (uv): `uv sync --group dev && uv run deptry .`
 - Pip fallback (editable): `python -m pip install -e .`
 
-System prerequisites for audio packaging: install `ffmpeg` and `espeak-ng` (e.g., `brew install ffmpeg espeak-ng` or `sudo apt-get install ffmpeg espeak-ng`).
+System prerequisites for audio packaging: install `ffmpeg` (e.g., `brew install ffmpeg` or `sudo apt-get install ffmpeg`).
 
 ## Coding Style & Naming Conventions
 - Python ≥ 3.9, PEP 8, 4‑space indentation.

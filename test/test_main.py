@@ -7,10 +7,6 @@ from ebooklib import epub
 
 from audiblez.core import main, find_document_chapters_and_extract_texts
 
-# from phonemizer.backend.espeak.wrapper import EspeakWrapper
-
-# EspeakWrapper.set_library('/opt/homebrew/Cellar/espeak-ng/1.52.0/lib/libespeak-ng.1.dylib')
-
 
 class MainTest(unittest.TestCase):
     def base(self, name, url='', **kwargs):

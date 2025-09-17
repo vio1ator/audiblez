@@ -5,7 +5,6 @@
 # by Claudio Santini 2025 - https://claudio.uk
 import os
 import traceback
-from glob import glob
 
 import torch
 import spacy
@@ -82,40 +81,6 @@ def load_spacy():
         _NLP = spacy.blank('xx')
         if 'sentencizer' not in _NLP.pipe_names:
             _NLP.add_pipe('sentencizer')
-
-
-def set_espeak_library():
-    """Find the espeak library path"""
-    try:
-
-        if os.environ.get('ESPEAK_LIBRARY'):
-            library = os.environ['ESPEAK_LIBRARY']
-        elif platform.system() == 'Darwin':
-            from subprocess import check_output
-            try:
-                cellar = Path(check_output(["brew", "--cellar"], text=True).strip())
-                pattern = cellar / "espeak-ng" / "*" / "lib" / "*.dylib"
-                if not (library := next(iter(glob(str(pattern))), None)):
-                    raise RuntimeError("No espeak-ng library found; please set the path manually")
-            except (subprocess.CalledProcessError, FileNotFoundError) as e:
-                raise RuntimeError("Cannot locate Homebrew Cellar. Is 'brew' installed and in PATH?") from e
-        elif platform.system() == 'Linux':
-            library = glob('/usr/lib/*/libespeak-ng*')[0]
-        elif platform.system() == 'Windows':
-            library = 'C:\\Program Files*\\eSpeak NG\\libespeak-ng.dll'
-        else:
-            print('Unsupported OS, please set the espeak library path manually')
-            return
-        print('Using espeak library:', library)
-        from phonemizer.backend.espeak.wrapper import EspeakWrapper
-        EspeakWrapper.set_library(library)
-    except Exception:
-        traceback.print_exc()
-        print("Error finding espeak-ng library:")
-        print("Probably you haven't installed espeak-ng.")
-        print("On Mac: brew install espeak-ng")
-        print("On Linux: sudo apt install espeak-ng")
-
 
 def main(file_path, voice, pick_manually, speed, output_folder='.',
          max_chapters=None, max_sentences=None, selected_chapters=None, post_event=None,
@@ -207,15 +172,12 @@ def main(file_path, voice, pick_manually, speed, output_folder='.',
     eta = strfdelta((stats.total_chars - stats.processed_chars) / stats.chars_per_sec)
     print(f'Estimated time remaining (initial, {stats.chars_per_sec:.0f} chars/sec): {eta}')
     # Build TTS pipeline
-    if backend == 'kokoro':
-        set_espeak_library()
     try:
         pipeline = create_pipeline(backend, voice, mlx_model)
         print(f'Using TTS backend: {backend} (model: {mlx_model if backend == "mlx" else "kokoro"})')
     except Exception:
         traceback.print_exc()
         print('Falling back to Kokoro backend.')
-        set_espeak_library()
         pipeline = create_pipeline('kokoro', voice, mlx_model)
 
     chapter_wav_files = []
@@ -451,10 +413,6 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
             # This covers both explicit 'mlx' and auto-selected MLX.
             print('MLX backend failed on a chunk; falling back to Kokoro. Reason:', str(e))
             try:
-                set_espeak_library()
-            except Exception:
-                pass
-            try:
                 fb = create_pipeline('kokoro', voice, mlx_model)
                 for gs, ps, audio in fb(buffer_text, voice=voice, speed=speed, split_pattern=r'(?!)'):
                     audio_segments.append(audio)
@@ -509,8 +467,6 @@ def gen_audio_segments(pipeline, text, voice, speed, stats=None, max_sentences=N
 
 
 def gen_text(text, voice='af_heart', output_file='text.wav', speed=1, play=False, backend='kokoro', mlx_model='mlx-community/Kokoro-82M-8bit'):
-    if backend == 'kokoro':
-        set_espeak_library()
     pipeline = create_pipeline(backend, voice, mlx_model)
     load_spacy()
     audio_segments = gen_audio_segments(pipeline, text, voice=voice, speed=speed, backend=backend, mlx_model=mlx_model)

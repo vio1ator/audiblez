@@ -229,34 +229,23 @@ dependencies = [
     { name = "ebooklib" },
     { name = "kokoro" },
     { name = "pick" },
+    { name = "pillow" },
     { name = "pymupdf" },
     { name = "soundfile" },
     { name = "spacy" },
     { name = "tabulate" },
+    { name = "urwid" },
+    { name = "wxpython" },
 ]
 
 [package.optional-dependencies]
-gui = [
-    { name = "pillow" },
-    { name = "wxpython" },
-]
 mlx = [
     { name = "mlx-audio", marker = "python_full_version >= '3.10'" },
-]
-tui = [
-    { name = "urwid" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "deptry" },
-]
-gui = [
-    { name = "pillow" },
-    { name = "wxpython" },
-]
-tui = [
-    { name = "urwid" },
 ]
 
 [package.metadata]
@@ -266,23 +255,18 @@ requires-dist = [
     { name = "kokoro", specifier = ">=0.7.9,<0.8.0" },
     { name = "mlx-audio", marker = "python_full_version >= '3.10' and extra == 'mlx'", specifier = ">=0.2.0" },
     { name = "pick", specifier = ">=2.4.0,<3.0.0" },
-    { name = "pillow", marker = "extra == 'gui'", specifier = ">=10.0.0" },
+    { name = "pillow", specifier = ">=10.0.0" },
     { name = "pymupdf", specifier = ">=1.24,<2.0" },
     { name = "soundfile", specifier = ">=0.13.1,<0.14.0" },
     { name = "spacy", specifier = ">=3.8.3,<4.0.0" },
     { name = "tabulate", specifier = ">=0.9.0,<0.10.0" },
-    { name = "urwid", marker = "extra == 'tui'", specifier = ">=2.1.2" },
-    { name = "wxpython", marker = "extra == 'gui'", specifier = ">=4.2.1" },
+    { name = "urwid", specifier = ">=2.1.2" },
+    { name = "wxpython", specifier = ">=4.2.1" },
 ]
-provides-extras = ["mlx", "gui", "tui"]
+provides-extras = ["mlx"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "deptry", specifier = ">=0.23.0" }]
-gui = [
-    { name = "pillow", specifier = ">=10.0.0" },
-    { name = "wxpython", specifier = ">=4.2.1" },
-]
-tui = [{ name = "urwid", specifier = ">=2.1.2" }]
 
 [[package]]
 name = "audioread"

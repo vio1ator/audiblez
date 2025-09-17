@@ -106,6 +106,15 @@ class KokoroPipelineWrapper:
     def __init__(self, lang_code: str) -> None:
         from kokoro import KPipeline  # late import to avoid import cost when unused
         self.pipeline = KPipeline(lang_code=lang_code)
+        # Force Misaki-only G2P so the runtime never falls back to espeak-ng.
+        try:
+            if getattr(self.pipeline, 'lang_code', '').lower() in ('a', 'b'):
+                g2p = getattr(self.pipeline, 'g2p', None)
+                if g2p is not None and hasattr(g2p, 'fallback'):
+                    g2p.fallback = None
+        except Exception:
+            # Fallback removal should never block synthesis; log handled upstream.
+            pass
 
     def __call__(self, text: str, voice: str, speed: float = 1.0, split_pattern: str = "\n\n\n"):
         # Proxy generator directly

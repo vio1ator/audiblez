@@ -107,15 +107,10 @@ class KokoroPipelineWrapper:
         from kokoro import KPipeline  # late import to avoid import cost when unused
         use_trf = lang_code.lower() in ('a', 'b')  # English voices benefit from transformer G2P
         self.pipeline = KPipeline(lang_code=lang_code, trf=use_trf)
-        # Force Misaki-only G2P so the runtime never falls back to espeak-ng.
-        try:
-            if getattr(self.pipeline, 'lang_code', '').lower() in ('a', 'b'):
-                g2p = getattr(self.pipeline, 'g2p', None)
-                if g2p is not None and hasattr(g2p, 'fallback'):
-                    g2p.fallback = None
-        except Exception:
-            # Fallback removal should never block synthesis; log handled upstream.
-            pass
+        # Keep Misaki's built-in espeak fallback for English voices so unknown
+        # words can still be phonemized. Kokoro will skip tokens when no
+        # fallback is available, so we intentionally leave the default in
+        # place rather than forcing Misaki-only G2P here.
 
     def __call__(self, text: str, voice: str, speed: float = 1.0, split_pattern: str = "\n\n\n"):
         # Proxy generator directly

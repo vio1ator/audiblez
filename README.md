@@ -12,7 +12,7 @@
 Audiblez generates `.m4b` audiobooks from regular `.epub` e-books,
 using Kokoro's high-quality speech synthesis.
 
-English voices are phonemized with Misaki out of the box, so there is no espeak-ng prerequisite.
+English voices are phonemized with Misaki and fall back to espeak-ng for unknown words; install `espeak-ng` (e.g. via `brew install espeak` or `apt-get install espeak-ng`) or the `audiblez[en]` extra to enable it locally.
 
 [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) is a recently published text-to-speech model with just 82M params and very natural sounding output.
 It's released under Apache licence and it was trained on < 100 hours of audio.

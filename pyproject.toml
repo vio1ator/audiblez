@@ -19,6 +19,8 @@ dependencies = [
     "wxPython>=4.2.1",
     "Pillow>=10.0.0",
     "urwid>=2.1.2",
+    "fastapi (>=0.112.0,<0.116.0)",
+    "uvicorn (>=0.30.0,<0.32.0)",
 ]
 
 [project.optional-dependencies]
@@ -38,6 +40,7 @@ Issues = "https://github.com/santinic/audiblez/issues"
 audiblez = "audiblez.cli:cli_main"
 audiblez-ui = "audiblez.ui:main"
 audiblez-tui = "audiblez.tui:main"
+audiblez-web = "audiblez.web:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["audiblez"]

@@ -60,6 +60,7 @@ Basic workflow:
 uv sync                  # create .venv and resolve dependencies
 uv run audiblez --help   # run CLI from the local env
 uv run audiblez-ui       # run GUI
+uv run audiblez-web --open  # run web UI
 
 # Run tests
 uv run python -m unittest discover test -v
@@ -88,6 +89,20 @@ Then you can run the GUI with:
 audiblez-ui
 ```
 
+## Web UI
+
+The web interface mirrors the terminal UI workflow with a responsive layout for
+desktop and mobile browsers. It supports filesystem browsing, voice/backend
+selection, chapter/page selection helpers, audio previews, and real-time
+synthesis progress. Launch it locally with:
+
+```
+audiblez-web --open
+```
+
+Use `--host` and `--port` if you want to bind to a different interface (for
+example, to access from a tablet or phone on the same network).
+
 ## How to run on Windows
 
 After many trials, on Windows we recommend to install audiblez in a Python venv:
@@ -98,7 +113,7 @@ After many trials, on Windows we recommend to install audiblez in a Python venv:
 4. Create a venv: `python -m venv venv`
 5. Activate the venv: `.\venv\Scripts\Activate.ps1`
 6. Install the dependencies: `pip install audiblez pillow wxpython`
-7. Now you can run `audiblez` or `audiblez-ui`
+7. Now you can run `audiblez`, `audiblez-ui`, or `audiblez-web`
 8. For Cuda support, you need to install Pytorch accordingly: https://pytorch.org/get-started/locally/
 
 
